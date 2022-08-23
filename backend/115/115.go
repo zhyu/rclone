@@ -20,7 +20,6 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -111,8 +110,6 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		pacer: fs.NewPacer(ctx, pacer.NewDefault()),
 		cache: cache.New(time.Minute*2, time.Minute*4),
 	}
-	logrus.Infof("uid: %v, cid: %v, seid: %v", opt.UID, opt.CID, opt.SEID)
-	logrus.Infof("fs: %+v, root: %v", f, f.root)
 	f.srv.SetHeader("User-Agent", userAgent)
 	f.srv.SetCookie(&http.Cookie{
 		Name:     "UID",
@@ -182,7 +179,6 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 // List the objects and directories in dir into entries
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	dir = f.slashClean(dir)
-	logrus.Infof("list %v", dir)
 	cacheKey := fmt.Sprintf("files:%s", dir)
 	if value, ok := f.cache.Get(cacheKey); ok {
 		return value.([]fs.DirEntry), nil
@@ -192,7 +188,6 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	if err != nil {
 		return nil, err
 	}
-	logrus.Infof("cid: %v", cid)
 
 	pageSize := int64(1000)
 	offset := int64(0)
@@ -305,7 +300,6 @@ func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
 		return "", err
 	}
 
-	logrus.Infof("get dir id, info: %v", info)
 	return info.CategoryID.String(), nil
 }
 
@@ -367,7 +361,6 @@ func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
 	})
 
 	if err != nil {
-		logrus.WithError(err).Errorf("failxxx")
 		return "", err
 	}
 
@@ -390,7 +383,6 @@ func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
 		if fileSize == 0 {
 			return "", fs.ErrorObjectNotFound
 		}
-		logrus.Infof("url: %v", info.URL.URL)
 		return info.URL.URL, nil
 	}
 
@@ -460,7 +452,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		logrus.Infof("open %v, status_code: %v", o.remote, resp.StatusCode)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
