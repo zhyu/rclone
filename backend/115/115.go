@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -20,6 +21,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -104,6 +106,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		return nil, err
 	}
 
+	logrus.Infof("NewFs, name: %v, root: %v, config: %+v", name, root, m)
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
 		name:  name,
@@ -114,6 +117,10 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		cache: cache.New(time.Minute*2, time.Minute*4),
 	}
+	if len(f.root) == 0 {
+		f.root = "/"
+	}
+	f.srv.SetRoot("https://webapi.115.com")
 	f.srv.SetHeader("User-Agent", userAgent)
 	f.srv.SetCookie(&http.Cookie{
 		Name:     "UID",
@@ -182,8 +189,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // List the objects and directories in dir into entries
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	dir = f.slashClean(dir)
-	cacheKey := fmt.Sprintf("files:%s", dir)
+	cacheKey := fmt.Sprintf("list:%s", dir)
 	if value, ok := f.cache.Get(cacheKey); ok {
 		return value.([]fs.DirEntry), nil
 	}
@@ -193,6 +199,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		return nil, err
 	}
 
+	logrus.Infof("dir: %v, cid: %v", dir, cid)
 	pageSize := int64(1000)
 	offset := int64(0)
 	files := make([]fs.DirEntry, 0)
@@ -257,6 +264,7 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	if len(remote) > 0 && remote[0] == '/' {
 		remote = remote[1:]
 	}
+	logrus.Infof("remote: %v, object: %+v", remote, object)
 	if object.IsDir() {
 		t := object.GetUpdateTime()
 		d := fs.NewDir(remote, t).SetSize(object.GetSize())
@@ -284,9 +292,9 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, object *api.F
 }
 
 func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
+	dir = f.slashClean(dir)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
-		RootURL:    "https://webapi.115.com",
 		Path:       "/files/getid",
 		Parameters: url.Values{},
 	}
@@ -310,7 +318,6 @@ func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
 func (f *Fs) getFiles(ctx context.Context, cid string, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
 	opts := rest.Opts{
 		Method:     http.MethodGet,
-		RootURL:    "https://webapi.115.com",
 		Path:       "/files",
 		Parameters: url.Values{},
 	}
@@ -394,9 +401,11 @@ func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
 }
 
 func (f *Fs) slashClean(name string) string {
+	name = path.Join(f.root, name)
 	if name == "" || name[0] != '/' {
 		name = "/" + name
 	}
+	logrus.Infof("path: %v", path.Clean(name))
 	return path.Clean(name)
 }
 
@@ -436,11 +445,10 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if t != hash.SHA1 {
 		return "", hash.ErrUnsupported
 	}
-	return o.sha1sum, nil
+	return strings.ToLower(o.sha1sum), nil
 }
 
 // Open an object for read
-// TODO: impl
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	targetURL, err := o.fs.getURL(ctx, o.pickCode)
 	if err != nil {
