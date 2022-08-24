@@ -273,6 +273,7 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, object *api.F
 		size:     object.GetSize(),
 		sha1sum:  strings.ToLower(object.Sha1),
 		pickCode: object.PickCode,
+		modTime:  object.GetUpdateTime(),
 	}
 	return o, nil
 }
