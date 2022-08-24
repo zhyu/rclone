@@ -21,13 +21,12 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
-	"github.com/sirupsen/logrus"
 )
 
 const (
 	userAgent = "Mozilla/5.0 115Browser/23.9.3"
 
-	minSleep      = 250 * time.Millisecond
+	minSleep      = 200 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
@@ -106,7 +105,9 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		return nil, err
 	}
 
-	logrus.Infof("NewFs, name: %v, root: %v, config: %+v", name, root, m)
+	if root == "" {
+		root = "/"
+	}
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
 		name:  name,
@@ -116,9 +117,6 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		srv:   rest.NewClient(&http.Client{}),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		cache: cache.New(time.Minute*2, time.Minute*4),
-	}
-	if len(f.root) == 0 {
-		f.root = "/"
 	}
 	f.srv.SetRoot("https://webapi.115.com")
 	f.srv.SetHeader("User-Agent", userAgent)
@@ -199,12 +197,11 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		return nil, err
 	}
 
-	logrus.Infof("dir: %v, cid: %v", dir, cid)
 	pageSize := int64(1000)
 	offset := int64(0)
 	files := make([]fs.DirEntry, 0)
 	for {
-		resp, err := f.getFiles(ctx, cid, pageSize, offset)
+		resp, err := f.getFiles(ctx, dir, cid, pageSize, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -229,22 +226,13 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 }
 
 // Put in to the remote path with the modTime given of the given size
-//
-// May create the object even if it returns an error - if so
-// will return the object and the error, otherwise will return
-// nil and the error
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return nil, errorReadOnly
-}
-
-// PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	return nil, errorReadOnly
 }
 
 // CreateDir makes a directory
 // TODO: impl
-func (f *Fs) CreateDir(ctx context.Context, path string) (err error) {
+func (f *Fs) CreateDir(ctx context.Context, dir string) (err error) {
 	return nil
 }
 
@@ -264,7 +252,6 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	if len(remote) > 0 && remote[0] == '/' {
 		remote = remote[1:]
 	}
-	logrus.Infof("remote: %v, object: %+v", remote, object)
 	if object.IsDir() {
 		t := object.GetUpdateTime()
 		d := fs.NewDir(remote, t).SetSize(object.GetSize())
@@ -278,27 +265,27 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	}
 }
 
-// TODO: impl
 func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, object *api.FileInfo) (fs.DirEntry, error) {
 	o := &Object{
 		fs:       f,
 		remote:   remote,
 		name:     object.GetName(),
 		size:     object.GetSize(),
-		sha1sum:  object.Sha1,
+		sha1sum:  strings.ToLower(object.Sha1),
 		pickCode: object.PickCode,
 	}
 	return o, nil
 }
 
 func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
-	dir = f.slashClean(dir)
+	fs.Logf(f, "get dir id, dir: %v", dir)
+	remoteDir := f.remoteDir(dir)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
 		Path:       "/files/getid",
 		Parameters: url.Values{},
 	}
-	opts.Parameters.Set("path", dir)
+	opts.Parameters.Set("path", remoteDir)
 
 	var err error
 	var info api.GetDirIDResponse
@@ -315,7 +302,8 @@ func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
 	return info.CategoryID.String(), nil
 }
 
-func (f *Fs) getFiles(ctx context.Context, cid string, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
+func (f *Fs) getFiles(ctx context.Context, dir string, cid string, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
+	fs.Logf(f, "get files, dir: %v, cid: %v", dir, cid)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
 		Path:       "/files",
@@ -348,7 +336,13 @@ func (f *Fs) getFiles(ctx context.Context, cid string, pageSize int64, offset in
 	return &info, nil
 }
 
-func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
+func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string, error) {
+	cacheKey := fmt.Sprintf("url:%s", pickCode)
+	if value, ok := f.cache.Get(cacheKey); ok {
+		return value.(string), nil
+	}
+
+	fs.Logf(f, "get url, remote: %v, pick_code: %v", remote, pickCode)
 	key := GenerateKey()
 	data, _ := json.Marshal(map[string]string{
 		"pickcode": pickCode,
@@ -394,18 +388,18 @@ func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
 		if fileSize == 0 {
 			return "", fs.ErrorObjectNotFound
 		}
+		f.cache.SetDefault(cacheKey, info.URL.URL)
 		return info.URL.URL, nil
 	}
 
 	return "", fs.ErrorObjectNotFound
 }
 
-func (f *Fs) slashClean(name string) string {
+func (f *Fs) remoteDir(name string) string {
 	name = path.Join(f.root, name)
 	if name == "" || name[0] != '/' {
 		name = "/" + name
 	}
-	logrus.Infof("path: %v", path.Clean(name))
 	return path.Clean(name)
 }
 
@@ -445,12 +439,13 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if t != hash.SHA1 {
 		return "", hash.ErrUnsupported
 	}
-	return strings.ToLower(o.sha1sum), nil
+	return o.sha1sum, nil
 }
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	targetURL, err := o.fs.getURL(ctx, o.pickCode)
+	fs.Logf(o, "open file, remote: %v", o.remote)
+	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
 	}
@@ -478,12 +473,6 @@ func (o *Object) Remove(ctx context.Context) error {
 	return errorReadOnly
 }
 
-// MimeType of an Object if known, "" otherwise
-// TODO: impl
-func (o *Object) MimeType(ctx context.Context) string {
-	return ""
-}
-
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	return errorReadOnly
@@ -509,6 +498,6 @@ var (
 	// _ fs.PublicLinker = (*Fs)(nil)
 	// _ fs.CleanUpper   = (*Fs)(nil)
 	// _ fs.Abouter      = (*Fs)(nil)
-	_ fs.Object    = (*Object)(nil)
-	_ fs.MimeTyper = (*Object)(nil)
+	_ fs.Object = (*Object)(nil)
+	// _ fs.MimeTyper = (*Object)(nil)
 )
