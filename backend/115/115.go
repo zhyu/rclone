@@ -24,6 +24,10 @@ import (
 
 const (
 	userAgent = "Mozilla/5.0 115Browser/23.9.3"
+
+	minSleep      = 250 * time.Millisecond
+	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
+	decayConstant = 2
 )
 
 var (
@@ -107,7 +111,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		opt:   *opt,
 		ci:    ci,
 		srv:   rest.NewClient(&http.Client{}),
-		pacer: fs.NewPacer(ctx, pacer.NewDefault()),
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		cache: cache.New(time.Minute*2, time.Minute*4),
 	}
 	f.srv.SetHeader("User-Agent", userAgent)
@@ -364,18 +368,18 @@ func (f *Fs) getURL(ctx context.Context, pickCode string) (string, error) {
 		return "", err
 	}
 
-	var respData string
-	if err := json.Unmarshal(info.Data, &respData); err != nil {
+	var encodedData string
+	if err := json.Unmarshal(info.Data, &encodedData); err != nil {
 		return "", fmt.Errorf("api get download url, call json.Unmarshal fail, body: %s", string(info.Data))
 	}
-
-	data2, err := Decode(respData, key)
+	decodedData, err := Decode(encodedData, key)
 	if err != nil {
 		return "", fmt.Errorf("api get download url, call Decode fail, err: %w", err)
 	}
+
 	result := api.DownloadData{}
-	if err := json.Unmarshal(data2, &result); err != nil {
-		return "", fmt.Errorf("api get download url, call json.Unmarshal fail, body: %s", string(data2))
+	if err := json.Unmarshal(decodedData, &result); err != nil {
+		return "", fmt.Errorf("api get download url, call json.Unmarshal fail, body: %s", string(decodedData))
 	}
 
 	for _, info := range result {
