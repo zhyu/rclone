@@ -26,7 +26,7 @@ import (
 const (
 	userAgent = "Mozilla/5.0 115Browser/23.9.3"
 
-	minSleep      = 200 * time.Millisecond
+	minSleep      = 100 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
@@ -78,13 +78,14 @@ type Fs struct {
 
 // Object describes a 115 object
 type Object struct {
-	fs       *Fs
-	remote   string
-	name     string
-	size     int64
-	sha1sum  string
-	pickCode string
-	modTime  time.Time
+	fs          *Fs
+	remote      string
+	hasMetaData bool
+	name        string
+	size        int64
+	sha1sum     string
+	pickCode    string
+	modTime     time.Time
 }
 
 // shouldRetry returns a boolean as to whether this resp and err
@@ -180,47 +181,26 @@ func (f *Fs) Hashes() hash.Set {
 
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
-// TODO: impl
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	return nil, nil
+	return f.newObjectWithInfo(ctx, remote, nil)
 }
 
 // List the objects and directories in dir into entries
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	cacheKey := fmt.Sprintf("list:%s", dir)
-	if value, ok := f.cache.Get(cacheKey); ok {
-		return value.([]fs.DirEntry), nil
-	}
-
-	cid, err := f.getDirID(ctx, dir)
+	infos, err := f.readDir(ctx, f.remotePath(dir))
 	if err != nil {
 		return nil, err
 	}
 
-	pageSize := int64(1000)
-	offset := int64(0)
-	files := make([]fs.DirEntry, 0)
-	for {
-		resp, err := f.getFiles(ctx, dir, cid, pageSize, offset)
+	files := make([]fs.DirEntry, 0, len(infos))
+	for _, info := range infos {
+		remote := path.Join(dir, info.GetName())
+		file, err := f.itemToDirEntry(ctx, remote, info)
 		if err != nil {
 			return nil, err
 		}
-
-		for _, fi := range resp.Data {
-			remote := path.Join(dir, fi.GetName())
-			item, err := f.itemToDirEntry(ctx, remote, &fi)
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, item)
-		}
-
-		offset = resp.Offset + pageSize
-		if offset >= resp.Count {
-			break
-		}
+		files = append(files, file)
 	}
-	f.cache.SetDefault(cacheKey, files)
 
 	return files, nil
 }
@@ -265,22 +245,80 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	}
 }
 
-func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, object *api.FileInfo) (fs.DirEntry, error) {
+func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.FileInfo) (fs.Object, error) {
 	o := &Object{
-		fs:       f,
-		remote:   remote,
-		name:     object.GetName(),
-		size:     object.GetSize(),
-		sha1sum:  strings.ToLower(object.Sha1),
-		pickCode: object.PickCode,
-		modTime:  object.GetUpdateTime(),
+		fs:     f,
+		remote: remote,
+	}
+	var err error
+	if info != nil {
+		err = o.setMetaData(info)
+	} else {
+		err = o.readMetaData(ctx)
+	}
+	if err != nil {
+		return nil, err
 	}
 	return o, nil
 }
 
-func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
-	fs.Logf(f, "get dir id, dir: %v", dir)
-	remoteDir := f.remoteDir(dir)
+func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
+	remotePath := f.remotePath(fullpath)
+	if remotePath == "/" {
+		return &api.FileInfo{CategoryID: "0"}, nil
+	}
+
+	remoteDir, filename := path.Split(remotePath)
+	infos, err := f.readDir(ctx, remoteDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, info := range infos {
+		if info.GetName() == filename {
+			return info, nil
+		}
+	}
+
+	return nil, fs.ErrorObjectNotFound
+}
+
+func (f *Fs) readDir(ctx context.Context, remoteDir string) ([]*api.FileInfo, error) {
+	cacheKey := fmt.Sprintf("files:%s", remoteDir)
+	if value, ok := f.cache.Get(cacheKey); ok {
+		return value.([]*api.FileInfo), nil
+	}
+
+	cid, err := f.getDirID(ctx, remoteDir)
+	if err != nil {
+		return nil, err
+	}
+
+	pageSize := int64(1000)
+	offset := int64(0)
+	files := make([]*api.FileInfo, 0)
+	for {
+		resp, err := f.getFiles(ctx, remoteDir, cid, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+
+		for idx := range resp.Data {
+			files = append(files, &resp.Data[idx])
+		}
+
+		offset = resp.Offset + pageSize
+		if offset >= resp.Count {
+			break
+		}
+	}
+	f.cache.SetDefault(cacheKey, files)
+
+	return files, nil
+}
+
+func (f *Fs) getDirID(ctx context.Context, remoteDir string) (string, error) {
+	fs.Logf(f, "get dir id, dir: %v", remoteDir)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
 		Path:       "/files/getid",
@@ -295,9 +333,11 @@ func (f *Fs) getDirID(ctx context.Context, dir string) (string, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
 		return shouldRetry(ctx, resp, err)
 	})
-
 	if err != nil {
 		return "", err
+	}
+	if !info.State || (remoteDir != "/" && info.CategoryID.String() == "0") {
+		return "", fs.ErrorDirNotFound
 	}
 
 	return info.CategoryID.String(), nil
@@ -396,7 +436,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	return "", fs.ErrorObjectNotFound
 }
 
-func (f *Fs) remoteDir(name string) string {
+func (f *Fs) remotePath(name string) string {
 	name = path.Join(f.root, name)
 	if name == "" || name[0] != '/' {
 		name = "/" + name
@@ -445,7 +485,7 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	fs.Logf(o, "open file, remote: %v", o.remote)
+	fs.Logf(o.fs, "open file, remote: %v", o.remote)
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
@@ -487,6 +527,34 @@ func (o *Object) Storable() bool {
 // Update in to the object with the modTime given of the given size
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	return errorReadOnly
+}
+
+// setMetaData sets the metadata from info
+func (o *Object) setMetaData(info *api.FileInfo) error {
+	o.hasMetaData = true
+	o.name = info.GetName()
+	o.size = info.GetSize()
+	o.sha1sum = strings.ToLower(info.Sha1)
+	o.pickCode = info.PickCode
+	o.modTime = info.GetUpdateTime()
+	return nil
+}
+
+// readMetaData gets the metadata if it hasn't already been fetched
+func (o *Object) readMetaData(ctx context.Context) error {
+	if o.hasMetaData {
+		return nil
+	}
+
+	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fs.ErrorIsDir
+	}
+
+	return o.setMetaData(info)
 }
 
 // Check the interfaces are satisfied
