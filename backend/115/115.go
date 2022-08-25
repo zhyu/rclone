@@ -15,6 +15,7 @@ import (
 
 	"github.com/patrickmn/go-cache"
 	"github.com/rclone/rclone/backend/115/api"
+	"github.com/rclone/rclone/backend/115/crypto"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
@@ -384,7 +385,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	}
 
 	fs.Logf(f, "get url, remote: %v, pick_code: %v", remote, pickCode)
-	key := GenerateKey()
+	key := crypto.GenerateKey()
 	data, _ := json.Marshal(map[string]string{
 		"pickcode": pickCode,
 	})
@@ -397,7 +398,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 		MultipartParams: url.Values{},
 	}
 	opts.Parameters.Add("t", strconv.FormatInt(time.Now().Unix(), 10))
-	opts.MultipartParams.Set("data", Encode(data, key))
+	opts.MultipartParams.Set("data", crypto.Encode(data, key))
 	var err error
 	var info api.BaseResponse
 	var resp *http.Response
@@ -414,7 +415,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	if err := json.Unmarshal(info.Data, &encodedData); err != nil {
 		return "", fmt.Errorf("api get download url, call json.Unmarshal fail, body: %s", string(info.Data))
 	}
-	decodedData, err := Decode(encodedData, key)
+	decodedData, err := crypto.Decode(encodedData, key)
 	if err != nil {
 		return "", fmt.Errorf("api get download url, call Decode fail, err: %w", err)
 	}
@@ -485,7 +486,7 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	fs.Logf(o.fs, "open file, remote: %v", o.remote)
+	fs.Logf(o.fs, "open file, remote: %v, options: %v", o.remote, options)
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
@@ -500,6 +501,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
+		fs.Logf(o.fs, "open file resp, remote: %v, status: %v", o.remote, resp.StatusCode)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
