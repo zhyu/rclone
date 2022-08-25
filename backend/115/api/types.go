@@ -10,14 +10,6 @@ type BaseResponse struct {
 	State bool   `json:"state"`
 }
 
-type GetURLResponse struct {
-	State bool            `json:"state"`
-	Msg   string          `json:"msg"`
-	Errno json.Number     `json:"errno"`
-	Error string          `json:"error,omitempty"`
-	Data  json.RawMessage `json:"data,omitempty"`
-}
-
 type GetFilesResponse struct {
 	AreaID     string      `json:"aid"`
 	CategoryID json.Number `json:"cid"`
@@ -44,6 +36,29 @@ type GetDirIDResponse struct {
 	CategoryID json.Number `json:"id"`
 	IsPrivate  json.Number `json:"is_private"`
 	State      bool        `json:"state"`
+}
+
+type IndexInfoResponse struct {
+	Error string        `json:"error,omitempty"`
+	State bool          `json:"state"`
+	Data  IndexInfoData `json:"data"`
+}
+
+type IndexInfoData struct {
+	SpaceInfo map[string]SizeInfo `json:"space_info"`
+}
+
+type SizeInfo struct {
+	Size       float64 `json:"size"`
+	SizeFormat string  `json:"size_format"`
+}
+
+type GetURLResponse struct {
+	State bool            `json:"state"`
+	Msg   string          `json:"msg"`
+	Errno json.Number     `json:"errno"`
+	Error string          `json:"error,omitempty"`
+	Data  json.RawMessage `json:"data,omitempty"`
 }
 
 type DownloadURL struct {

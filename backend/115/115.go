@@ -326,6 +326,27 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 	return f.deleteFile(ctx, info.GetCategoryID(), info.GetParentID())
 }
 
+// About gets quota information from the Fs
+func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
+	info, err := f.indexInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	usage := &fs.Usage{}
+	if totalInfo, ok := info.Data.SpaceInfo["all_total"]; ok {
+		usage.Total = fs.NewUsageValue(int64(totalInfo.Size))
+	}
+	if useInfo, ok := info.Data.SpaceInfo["all_use"]; ok {
+		usage.Used = fs.NewUsageValue(int64(useInfo.Size))
+	}
+	if remainInfo, ok := info.Data.SpaceInfo["all_remain"]; ok {
+		usage.Free = fs.NewUsageValue(int64(remainInfo.Size))
+	}
+
+	return usage, nil
+}
+
 func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.FileInfo) (fs.DirEntry, error) {
 	if len(remote) > 0 && remote[0] == '/' {
 		remote = remote[1:]
@@ -448,6 +469,7 @@ func (f *Fs) makeDir(ctx context.Context, remoteDir string) error {
 		fs.Logf("make dir fail, dir: %v", remoteDir)
 	}
 
+	f.flushDir(parent)
 	return nil
 }
 
@@ -655,6 +677,26 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	return "", fs.ErrorObjectNotFound
 }
 
+func (f *Fs) indexInfo(ctx context.Context) (*api.IndexInfoResponse, error) {
+	opts := rest.Opts{
+		Method: http.MethodGet,
+		Path:   "/files/index_info",
+	}
+
+	var err error
+	var info api.IndexInfoResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
 func (f *Fs) remotePath(name string) string {
 	name = path.Join(f.root, name)
 	if name == "" || name[0] != '/' {
@@ -801,7 +843,7 @@ var (
 	_ fs.DirMover = (*Fs)(nil)
 	// _ fs.PublicLinker = (*Fs)(nil)
 	// _ fs.CleanUpper   = (*Fs)(nil)
-	// _ fs.Abouter      = (*Fs)(nil)
-	_ fs.Object = (*Object)(nil)
+	_ fs.Abouter = (*Fs)(nil)
+	_ fs.Object  = (*Object)(nil)
 	// _ fs.MimeTyper = (*Object)(nil)
 )
