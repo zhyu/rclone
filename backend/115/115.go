@@ -3,7 +3,6 @@ package _115
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,10 +29,6 @@ const (
 	minSleep      = 100 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
-)
-
-var (
-	errorReadOnly = errors.New("http remotes are read only")
 )
 
 // Register with Fs
@@ -86,6 +81,7 @@ type Object struct {
 	size        int64
 	sha1sum     string
 	pickCode    string
+	fileID      int64
 	modTime     time.Time
 }
 
@@ -208,25 +204,126 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 // Put in to the remote path with the modTime given of the given size
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return nil, errorReadOnly
-}
-
-// CreateDir makes a directory
-// TODO: impl
-func (f *Fs) CreateDir(ctx context.Context, dir string) (err error) {
-	return nil
+	return nil, fs.ErrorNotImplemented
 }
 
 // Mkdir creates the container if it doesn't exist
-// TODO: impl
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+	return f.makeDir(ctx, f.remotePath(dir))
+}
+
+// Move src to this remote using server-side move operations.
+func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
+	if src.Fs().Name() != f.Name() {
+		return nil, fs.ErrorCantMove
+	}
+
+	srcObj, ok := src.(*Object)
+	if !ok {
+		fs.Errorf(f, "can not move, not same remote type")
+		return nil, fs.ErrorCantMove
+	}
+
+	srcParent, srcName := path.Split(f.remotePath(srcObj.remote))
+	dstParent, dstName := path.Split(f.remotePath(remote))
+	if srcParent == dstParent {
+		if srcName == dstName {
+			return srcObj, nil
+		}
+
+		err := f.renameFile(ctx, srcObj.fileID, dstName)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if srcObj.name != dstName {
+			return nil, fs.ErrorCantMove
+		}
+
+		cid, err := f.getDirID(ctx, dstParent)
+		if err != nil {
+			return nil, err
+		}
+		err = f.moveFile(ctx, srcObj.fileID, cid)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	f.flushDir(srcParent)
+	f.flushDir(dstParent)
+	return f.NewObject(ctx, remote)
+}
+
+// DirMove moves src, srcRemote to this remote at dstRemote
+func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
+	if src.Name() != f.Name() {
+		return fs.ErrorCantDirMove
+	}
+
+	srcParent, srcName := path.Split(f.remotePath(srcRemote))
+	dstParent, dstName := path.Split(f.remotePath(dstRemote))
+	if srcParent == dstParent {
+		if srcName == dstName {
+			return nil
+		}
+
+		cid, err := f.getDirID(ctx, f.remotePath(srcRemote))
+		if err != nil {
+			return err
+		}
+
+		err = f.renameFile(ctx, cid, dstName)
+		if err != nil {
+			return err
+		}
+	} else {
+		if srcName != dstName {
+			return fs.ErrorCantDirMove
+		}
+
+		srcCid, err := f.getDirID(ctx, f.remotePath(srcRemote))
+		if err != nil {
+			return err
+		}
+		dstCid, err := f.getDirID(ctx, dstParent)
+		if err != nil {
+			return err
+		}
+
+		err = f.moveFile(ctx, srcCid, dstCid)
+		if err != nil {
+			return err
+		}
+	}
+
+	f.flushDir(srcParent)
+	f.flushDir(dstParent)
 	return nil
 }
 
 // Rmdir deletes the container
-// TODO: impl
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
-	return nil
+	return f.Purge(ctx, dir)
+}
+
+// Purge all files in the directory specified
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	info, err := f.readMetaDataForPath(ctx, dir)
+	if err != nil {
+		fs.Errorf(f, "purge fail, err: %v, dir: %v", err, dir)
+		return err
+	}
+
+	if !info.IsDir() {
+		return fs.ErrorIsFile
+	}
+	if info.GetCategoryID() == 0 {
+		fs.Logf(f, "is root dir, can not purge")
+		return nil
+	}
+
+	return f.deleteFile(ctx, info.GetCategoryID(), info.GetParentID())
 }
 
 func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.FileInfo) (fs.DirEntry, error) {
@@ -235,7 +332,7 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	}
 	if object.IsDir() {
 		t := object.GetUpdateTime()
-		d := fs.NewDir(remote, t).SetSize(object.GetSize())
+		d := fs.NewDir(remote, t)
 		return d, nil
 	} else {
 		o, err := f.newObjectWithInfo(ctx, remote, object)
@@ -318,7 +415,43 @@ func (f *Fs) readDir(ctx context.Context, remoteDir string) ([]*api.FileInfo, er
 	return files, nil
 }
 
-func (f *Fs) getDirID(ctx context.Context, remoteDir string) (string, error) {
+func (f *Fs) makeDir(ctx context.Context, remoteDir string) error {
+	fs.Logf(f, "make dir, dir: %v", remoteDir)
+	parent, name := path.Split(remoteDir)
+	cid, err := f.getDirID(ctx, parent)
+	if err != nil {
+		return err
+	}
+	if cid == -1 {
+		fs.Logf(f, "make dir fail, cid is -1")
+		return nil
+	}
+
+	opts := rest.Opts{
+		Method:          http.MethodPost,
+		Path:            "/files/add",
+		MultipartParams: url.Values{},
+	}
+	opts.MultipartParams.Set("pid", strconv.FormatInt(cid, 10))
+	opts.MultipartParams.Set("cname", name)
+
+	var info api.BaseResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return err
+	}
+	if !info.State {
+		fs.Logf("make dir fail, dir: %v", remoteDir)
+	}
+
+	return nil
+}
+
+func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 	fs.Logf(f, "get dir id, dir: %v", remoteDir)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
@@ -335,16 +468,17 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (string, error) {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return "", err
+		return -1, err
 	}
 	if !info.State || (remoteDir != "/" && info.CategoryID.String() == "0") {
-		return "", fs.ErrorDirNotFound
+		return -1, fs.ErrorDirNotFound
 	}
 
-	return info.CategoryID.String(), nil
+	cid, _ := info.CategoryID.Int64()
+	return cid, nil
 }
 
-func (f *Fs) getFiles(ctx context.Context, dir string, cid string, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
+func (f *Fs) getFiles(ctx context.Context, dir string, cid int64, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
 	fs.Logf(f, "get files, dir: %v, cid: %v", dir, cid)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
@@ -352,7 +486,7 @@ func (f *Fs) getFiles(ctx context.Context, dir string, cid string, pageSize int6
 		Parameters: url.Values{},
 	}
 	opts.Parameters.Set("aid", "1")
-	opts.Parameters.Set("cid", cid)
+	opts.Parameters.Set("cid", strconv.FormatInt(cid, 10))
 	opts.Parameters.Set("o", "user_ptime")
 	opts.Parameters.Set("asc", "0")
 	opts.Parameters.Set("offset", strconv.FormatInt(offset, 10))
@@ -378,6 +512,90 @@ func (f *Fs) getFiles(ctx context.Context, dir string, cid string, pageSize int6
 	return &info, nil
 }
 
+func (f *Fs) deleteFile(ctx context.Context, fid int64, pid int64) error {
+	fs.Logf(f, "delete file, fid: %v, pid: %v", fid, pid)
+	opts := rest.Opts{
+		Method:          http.MethodPost,
+		Path:            "/rb/delete",
+		MultipartParams: url.Values{},
+	}
+	opts.MultipartParams.Set("fid[0]", strconv.FormatInt(fid, 10))
+	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
+	opts.MultipartParams.Set("ignore_warn", "1")
+
+	var err error
+	var info api.BaseResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return err
+	}
+	if !info.State {
+		fs.Logf(f, "delete file fail, not state")
+		return nil
+	}
+
+	return nil
+}
+
+func (f *Fs) moveFile(ctx context.Context, fid int64, pid int64) error {
+	fs.Logf(f, "move file, fid: %v, pid: %v", fid, pid)
+	opts := rest.Opts{
+		Method:          http.MethodPost,
+		Path:            "/files/move",
+		MultipartParams: url.Values{},
+	}
+	opts.MultipartParams.Set("fid[0]", strconv.FormatInt(fid, 10))
+	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
+
+	var err error
+	var info api.BaseResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return err
+	}
+	if !info.State {
+		fs.Logf(f, "move file fail, not state")
+		return nil
+	}
+
+	return nil
+}
+
+func (f *Fs) renameFile(ctx context.Context, fid int64, name string) error {
+	fs.Logf(f, "rename file, fid: %v, name: %v", fid, name)
+	opts := rest.Opts{
+		Method:          http.MethodPost,
+		Path:            "/files/batch_rename",
+		MultipartParams: url.Values{},
+	}
+	opts.MultipartParams.Set(fmt.Sprintf("files_new_name[%d]", fid), name)
+
+	var err error
+	var info api.BaseResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return err
+	}
+	if !info.State {
+		fs.Logf(f, "rename file fail, not state")
+		return nil
+	}
+
+	return nil
+}
+
 func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string, error) {
 	cacheKey := fmt.Sprintf("url:%s", pickCode)
 	if value, ok := f.cache.Get(cacheKey); ok {
@@ -400,7 +618,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	opts.Parameters.Add("t", strconv.FormatInt(time.Now().Unix(), 10))
 	opts.MultipartParams.Set("data", crypto.Encode(data, key))
 	var err error
-	var info api.BaseResponse
+	var info api.GetURLResponse
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
@@ -443,6 +661,11 @@ func (f *Fs) remotePath(name string) string {
 		name = "/" + name
 	}
 	return path.Clean(name)
+}
+
+func (f *Fs) flushDir(dir string) {
+	cacheKey := fmt.Sprintf("files:%v", dir)
+	f.cache.Delete(cacheKey)
 }
 
 // ------------------------------------------------------------
@@ -491,7 +714,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if err != nil {
 		return nil, err
 	}
-
 	opts := rest.Opts{
 		Method:  http.MethodGet,
 		RootURL: targetURL,
@@ -513,12 +735,22 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Remove an object
 func (o *Object) Remove(ctx context.Context) error {
-	return errorReadOnly
+	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
+	if err != nil {
+		fs.Errorf(o.fs, "remove object fail, err: %v, remote: %v", err, o.remote)
+		return err
+	}
+
+	if info.IsDir() {
+		return fs.ErrorIsDir
+	}
+
+	return o.fs.deleteFile(ctx, info.GetFileID(), info.GetParentID())
 }
 
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	return errorReadOnly
+	return fs.ErrorNotImplemented
 }
 
 // Storable returns whether this object is storable
@@ -528,7 +760,7 @@ func (o *Object) Storable() bool {
 
 // Update in to the object with the modTime given of the given size
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	return errorReadOnly
+	return fs.ErrorNotImplemented
 }
 
 // setMetaData sets the metadata from info
@@ -538,6 +770,7 @@ func (o *Object) setMetaData(info *api.FileInfo) error {
 	o.size = info.GetSize()
 	o.sha1sum = strings.ToLower(info.Sha1)
 	o.pickCode = info.PickCode
+	o.fileID = info.GetFileID()
 	o.modTime = info.GetUpdateTime()
 	return nil
 }
@@ -561,11 +794,11 @@ func (o *Object) readMetaData(ctx context.Context) error {
 
 // Check the interfaces are satisfied
 var (
-	_ fs.Fs = (*Fs)(nil)
-	// _ fs.Purger = (*Fs)(nil)
+	_ fs.Fs     = (*Fs)(nil)
+	_ fs.Purger = (*Fs)(nil)
 	// _ fs.Copier       = (*Fs)(nil)
-	// _ fs.Mover        = (*Fs)(nil)
-	// _ fs.DirMover     = (*Fs)(nil)
+	_ fs.Mover    = (*Fs)(nil)
+	_ fs.DirMover = (*Fs)(nil)
 	// _ fs.PublicLinker = (*Fs)(nil)
 	// _ fs.CleanUpper   = (*Fs)(nil)
 	// _ fs.Abouter      = (*Fs)(nil)

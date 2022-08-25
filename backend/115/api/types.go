@@ -6,9 +6,15 @@ import (
 )
 
 type BaseResponse struct {
+	Error string `json:"error,omitempty"`
+	State bool   `json:"state"`
+}
+
+type GetURLResponse struct {
 	State bool            `json:"state"`
 	Msg   string          `json:"msg"`
 	Errno json.Number     `json:"errno"`
+	Error string          `json:"error,omitempty"`
 	Data  json.RawMessage `json:"data,omitempty"`
 }
 
@@ -19,7 +25,7 @@ type GetFilesResponse struct {
 	Cur        int64       `json:"cur"`
 	Data       []FileInfo  `json:"data"`
 	DataSource string      `json:"data_source"`
-	ErrNo      int64       `json:"errNo"`
+	Errno      int64       `json:"errNo"`
 	Error      string      `json:"error"`
 	Limit      int64       `json:"limit"`
 	MaxSize    int64       `json:"max_size"`
@@ -33,7 +39,7 @@ type GetFilesResponse struct {
 }
 
 type GetDirIDResponse struct {
-	ErrNo      json.Number `json:"errno"`
+	Errno      json.Number `json:"errno"`
 	Error      string      `json:"error"`
 	CategoryID json.Number `json:"id"`
 	IsPrivate  json.Number `json:"is_private"`
@@ -92,6 +98,20 @@ func (f *FileInfo) GetCreateTime() time.Time {
 }
 
 func (f *FileInfo) IsDir() bool {
+	return f.GetFileID() == 0
+}
+
+func (f *FileInfo) GetFileID() int64 {
 	fid, _ := f.FileID.Int64()
-	return fid == 0
+	return fid
+}
+
+func (f *FileInfo) GetCategoryID() int64 {
+	cid, _ := f.CategoryID.Int64()
+	return cid
+}
+
+func (f *FileInfo) GetParentID() int64 {
+	pid, _ := f.ParentID.Int64()
+	return pid
 }
