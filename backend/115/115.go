@@ -3,6 +3,7 @@ package _115
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,21 +11,25 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/patrickmn/go-cache"
 	"github.com/rclone/rclone/backend/115/api"
 	"github.com/rclone/rclone/backend/115/crypto"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
 )
 
 const (
-	userAgent = "Mozilla/5.0 115Browser/23.9.3"
+	// userAgent = "Mozilla/5.0 115Browser/23.9.3"
+	userAgent = "Mozilla/5.0 115Browser/8.6.2"
 
 	minSleep      = 100 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
@@ -49,15 +54,30 @@ func init() {
 			Name:     "seid",
 			Help:     "SEID from cookie",
 			Required: true,
+		}, {
+			Name:     config.ConfigEncoding,
+			Help:     config.ConfigEncodingHelp,
+			Advanced: true,
+			Default: (encoder.Display |
+				encoder.EncodeBackSlash |
+				encoder.EncodeSlash |
+				encoder.EncodeColon |
+				encoder.EncodeAsterisk |
+				encoder.EncodeQuestion |
+				encoder.EncodeDoubleQuote |
+				encoder.EncodeLtGt |
+				encoder.EncodePipe |
+				encoder.EncodeInvalidUtf8),
 		}},
 	})
 }
 
 // Options defines the configguration of this backend
 type Options struct {
-	UID  string `config:"uid"`
-	CID  string `config:"cid"`
-	SEID string `config:"seid"`
+	UID  string               `config:"uid"`
+	CID  string               `config:"cid"`
+	SEID string               `config:"seid"`
+	Enc  encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs represents a remote 115 drive
@@ -116,6 +136,17 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		cache: cache.New(time.Minute*2, time.Minute*4),
 	}
+	f.srv.SetErrorHandler(func(resp *http.Response) error {
+		body, err := rest.ReadBody(resp)
+		if err != nil {
+			return fmt.Errorf("error reading error out of body: %w", err)
+		}
+		if resp.StatusCode == 403 {
+			time.Sleep(time.Second)
+		}
+		return fmt.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
+	})
+	f.pacer.SetMaxConnections(2)
 	f.srv.SetRoot("https://webapi.115.com")
 	f.srv.SetHeader("User-Agent", userAgent)
 	f.srv.SetCookie(&http.Cookie{
@@ -204,12 +235,43 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 // Put in to the remote path with the modTime given of the given size
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	if src.Size() == 0 {
+		return nil, fs.ErrorCantUploadEmptyFiles
+	}
+
 	return nil, fs.ErrorNotImplemented
 }
 
 // Mkdir creates the container if it doesn't exist
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	return f.makeDir(ctx, f.remotePath(dir))
+	paths := strings.Split(f.remotePath(dir), "/")
+	prefix := ""
+	if len(paths) == 0 {
+		return nil
+	}
+
+	for idx := 0; idx+1 < len(paths); idx++ {
+		prefix += "/" + paths[idx]
+		cid, err := f.getDirID(ctx, prefix)
+		if err != nil {
+			return err
+		}
+		if cid == -1 {
+			fs.Logf(f, "make dir fail, cid is -1")
+			return nil
+		}
+
+		err = f.makeDir(ctx, cid, paths[idx+1])
+		if errors.Is(err, fs.ErrorDirExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		f.flushDir(prefix)
+	}
+	return nil
 }
 
 // Move src to this remote using server-side move operations.
@@ -311,10 +373,12 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 func (f *Fs) Purge(ctx context.Context, dir string) error {
 	info, err := f.readMetaDataForPath(ctx, dir)
 	if err != nil {
-		fs.Errorf(f, "purge fail, err: %v, dir: %v", err, dir)
+		fs.Errorf(f, "purge fail, err: %v, dir: %v", err, f.remotePath(dir))
+		if errors.Is(err, fs.ErrorObjectNotFound) {
+			return fs.ErrorDirNotFound
+		}
 		return err
 	}
-
 	if !info.IsDir() {
 		return fs.ErrorIsFile
 	}
@@ -323,7 +387,15 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 		return nil
 	}
 
-	return f.deleteFile(ctx, info.GetCategoryID(), info.GetParentID())
+	err = f.deleteFile(ctx, info.GetCategoryID(), info.GetParentID())
+	if err != nil {
+		return err
+	}
+
+	parent, _ := path.Split(f.remotePath(dir))
+	f.flushDir(parent)
+
+	return nil
 }
 
 // About gets quota information from the Fs
@@ -390,6 +462,9 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.Fil
 	remoteDir, filename := path.Split(remotePath)
 	infos, err := f.readDir(ctx, remoteDir)
 	if err != nil {
+		if errors.Is(err, fs.ErrorDirNotFound) {
+			return nil, fs.ErrorObjectNotFound
+		}
 		return nil, err
 	}
 
@@ -436,27 +511,18 @@ func (f *Fs) readDir(ctx context.Context, remoteDir string) ([]*api.FileInfo, er
 	return files, nil
 }
 
-func (f *Fs) makeDir(ctx context.Context, remoteDir string) error {
-	fs.Logf(f, "make dir, dir: %v", remoteDir)
-	parent, name := path.Split(remoteDir)
-	cid, err := f.getDirID(ctx, parent)
-	if err != nil {
-		return err
-	}
-	if cid == -1 {
-		fs.Logf(f, "make dir fail, cid is -1")
-		return nil
-	}
-
+func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
+	fs.Logf(f, "make dir, pid: %v, name: %v", pid, name)
 	opts := rest.Opts{
 		Method:          http.MethodPost,
 		Path:            "/files/add",
 		MultipartParams: url.Values{},
 	}
-	opts.MultipartParams.Set("pid", strconv.FormatInt(cid, 10))
+	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
 	opts.MultipartParams.Set("cname", name)
 
-	var info api.BaseResponse
+	var err error
+	var info api.MkdirResponse
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
@@ -466,15 +532,18 @@ func (f *Fs) makeDir(ctx context.Context, remoteDir string) error {
 		return err
 	}
 	if !info.State {
-		fs.Logf("make dir fail, dir: %v", remoteDir)
+		if errno, ok := info.Errno.(int64); ok && errno == 20004 {
+			fs.Logf(f, "make dir exists, pid: %v, name: %v, err: %v", pid, name, info.Error)
+			return fs.ErrorDirExists
+		}
+		fs.Logf(f, "make dir fail, pid: %v, name: %v, err: %v", pid, name, info.Error)
+		return nil
 	}
 
-	f.flushDir(parent)
 	return nil
 }
 
 func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
-	fs.Logf(f, "get dir id, dir: %v", remoteDir)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
 		Path:       "/files/getid",
@@ -501,7 +570,6 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 }
 
 func (f *Fs) getFiles(ctx context.Context, dir string, cid int64, pageSize int64, offset int64) (*api.GetFilesResponse, error) {
-	fs.Logf(f, "get files, dir: %v, cid: %v", dir, cid)
 	opts := rest.Opts{
 		Method:     http.MethodGet,
 		Path:       "/files",
@@ -556,7 +624,7 @@ func (f *Fs) deleteFile(ctx context.Context, fid int64, pid int64) error {
 		return err
 	}
 	if !info.State {
-		fs.Logf(f, "delete file fail, not state")
+		fs.Logf(f, "delete file fail, not state, err: %v", info.Error)
 		return nil
 	}
 
@@ -598,6 +666,7 @@ func (f *Fs) renameFile(ctx context.Context, fid int64, name string) error {
 		Path:            "/files/batch_rename",
 		MultipartParams: url.Values{},
 	}
+	// opts.MultipartParams.Set(fmt.Sprintf("files_new_name[%d]", fid), f.opt.Enc.ToStandardName(name))
 	opts.MultipartParams.Set(fmt.Sprintf("files_new_name[%d]", fid), name)
 
 	var err error
@@ -611,7 +680,7 @@ func (f *Fs) renameFile(ctx context.Context, fid int64, name string) error {
 		return err
 	}
 	if !info.State {
-		fs.Logf(f, "rename file fail, not state")
+		fs.Logf(f, "rename file fail, not state, err: %v", info.Error)
 		return nil
 	}
 
@@ -624,7 +693,6 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 		return value.(string), nil
 	}
 
-	fs.Logf(f, "get url, remote: %v, pick_code: %v", remote, pickCode)
 	key := crypto.GenerateKey()
 	data, _ := json.Marshal(map[string]string{
 		"pickcode": pickCode,
@@ -706,7 +774,7 @@ func (f *Fs) remotePath(name string) string {
 }
 
 func (f *Fs) flushDir(dir string) {
-	cacheKey := fmt.Sprintf("files:%v", dir)
+	cacheKey := fmt.Sprintf("files:%v", path.Clean(dir))
 	f.cache.Delete(cacheKey)
 }
 
@@ -749,13 +817,18 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	return o.sha1sum, nil
 }
 
+var bodylist = make([]io.ReadCloser, 2, 2)
+var bodyindex = 0
+var bodylock = sync.Mutex{}
+
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	fs.Logf(o.fs, "open file, remote: %v, options: %v", o.remote, options)
+	// fs.Logf(o.fs, "open file, remote: %v, options: %v", o.remote, options)
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
 	}
+	fs.FixRangeOption(options, o.size)
 	opts := rest.Opts{
 		Method:  http.MethodGet,
 		RootURL: targetURL,
@@ -765,7 +838,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		fs.Logf(o.fs, "open file resp, remote: %v, status: %v", o.remote, resp.StatusCode)
+		// fs.Logf(o.fs, "open file resp, remote: %v, status: %v, options: %v", o.remote, resp.StatusCode, options)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -787,7 +860,15 @@ func (o *Object) Remove(ctx context.Context) error {
 		return fs.ErrorIsDir
 	}
 
-	return o.fs.deleteFile(ctx, info.GetFileID(), info.GetParentID())
+	err = o.fs.deleteFile(ctx, info.GetFileID(), info.GetParentID())
+	if err != nil {
+		return err
+	}
+
+	parent, _ := path.Split(o.fs.remotePath(o.remote))
+	o.fs.flushDir(parent)
+
+	return nil
 }
 
 // SetModTime sets the modification time of the local fs object

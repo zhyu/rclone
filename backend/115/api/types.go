@@ -61,6 +61,12 @@ type GetURLResponse struct {
 	Data  json.RawMessage `json:"data,omitempty"`
 }
 
+type MkdirResponse struct {
+	Errno interface{} `json:"errno,omitempty"`
+	Error string      `json:"error,omitempty"`
+	State bool        `json:"state"`
+}
+
 type DownloadURL struct {
 	URL    string      `json:"url"`
 	Client json.Number `json:"client"`
