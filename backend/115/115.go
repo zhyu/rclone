@@ -207,7 +207,7 @@ func (f *Fs) Root() string {
 	return f.root
 }
 
-// String converts this Fs to string
+// String returns a description of the FS
 func (f *Fs) String() string {
 	return fmt.Sprintf("115 %s", f.root)
 }
@@ -217,32 +217,35 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
-// Precision return the precision of this Fs
+// Precision of the ModTimes in this Fs
 func (f *Fs) Precision() time.Duration {
 	return fs.ModTimeNotSupported
 }
 
-// Hashes returns the supported hash sets.
+// Hashes returns the supported hash types of the filesystem
 func (f *Fs) Hashes() hash.Set {
 	return hash.Set(hash.SHA1)
 }
 
 // NewObject finds the Object at remote.  If it can't be found
-// it returns the error fs.ErrorObjectNotFound.
+// it returns the error ErrorObjectNotFound.
+//
+// If remote points to a directory then it should return
+// ErrorIsDir if possible without doing any extra work,
+// otherwise ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	return f.newObjectWithInfo(ctx, remote, nil)
 }
 
-func (f *Fs) createObject(remote string, modTime time.Time, size int64) *Object {
-	return &Object{
-		fs:      f,
-		remote:  remote,
-		size:    size,
-		modTime: modTime,
-	}
-}
-
-// List the objects and directories in dir into entries
+// List the objects and directories in dir into entries.  The
+// entries can be returned in any order but should be for a
+// complete directory.
+//
+// dir should be "" to list the root, and should not have
+// trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	infos, err := f.readDir(ctx, f.remotePath(dir))
 	if err != nil {
@@ -278,10 +281,11 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 	o := f.createObject(src.Remote(), src.ModTime(ctx), src.Size())
 	return o, o.Update(ctx, in, src, options...)
-
 }
 
-// Mkdir creates the container if it doesn't exist
+// Mkdir makes the directory (container, bucket)
+//
+// Shouldn't return an error if it already exists
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	paths := strings.Split(f.remotePath(dir), "/")
 	prefix := ""
@@ -314,6 +318,14 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 }
 
 // Move src to this remote using server-side move operations.
+//
+// # This is stored with the remote path given
+//
+// # It returns the destination Object and a possible error
+//
+// Will only be called if src.Fs().Name() == f.Name()
+//
+// If it isn't possible then return fs.ErrorCantMove
 func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object, error) {
 	if src.Fs().Name() != f.Name() {
 		return nil, fs.ErrorCantMove
@@ -756,7 +768,6 @@ func (f *Fs) renameFile(ctx context.Context, fid int64, name string) error {
 		Path:            "/files/batch_rename",
 		MultipartParams: url.Values{},
 	}
-	// opts.MultipartParams.Set(fmt.Sprintf("files_new_name[%d]", fid), f.opt.Enc.ToStandardName(name))
 	opts.MultipartParams.Set(fmt.Sprintf("files_new_name[%d]", fid), name)
 
 	var err error
@@ -967,6 +978,15 @@ func (f *Fs) indexInfo(ctx context.Context) (*api.IndexInfoResponse, error) {
 	return &info, nil
 }
 
+func (f *Fs) createObject(remote string, modTime time.Time, size int64) *Object {
+	return &Object{
+		fs:      f,
+		remote:  remote,
+		size:    size,
+		modTime: modTime,
+	}
+}
+
 func (f *Fs) remotePath(name string) string {
 	name = path.Join(f.root, name)
 	if name == "" || name[0] != '/' {
@@ -982,13 +1002,13 @@ func (f *Fs) flushDir(dir string) {
 
 // ------------------------------------------------------------
 
-// Fs returns the parent Fs
+// Fs returns read only access to the Fs that this object is part of
 func (o *Object) Fs() fs.Info {
 	return o.fs
 
 }
 
-// String convert this Object to string
+// String returns a description of the Object
 func (o *Object) String() string {
 	if o == nil {
 		return "<nil>"
@@ -1001,17 +1021,19 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
-// ModTime returns the modification time of the object
+// ModTime returns the modification date of the file
+// It should return a best guess if one isn't available
 func (o *Object) ModTime(ctx context.Context) time.Time {
 	return o.modTime
 }
 
-// Size returns the size of an object in bytes
+// Size returns the size of the file
 func (o *Object) Size() int64 {
 	return o.size
 }
 
-// Hash returns the Md5sum of an object returning a lowercase hex string
+// Hash returns the selected checksum of the file
+// If no checksum is available it returns ""
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if t != hash.SHA1 {
 		return "", hash.ErrUnsupported
@@ -1019,7 +1041,7 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	return o.sha1sum, nil
 }
 
-// Open an object for read
+// Open opens the file for read.  Call Close() on the returned io.ReadCloser
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
@@ -1044,7 +1066,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	return resp.Body, err
 }
 
-// Remove an object
+// Remove this object
 func (o *Object) Remove(ctx context.Context) error {
 	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
 	if err != nil {
@@ -1067,18 +1089,22 @@ func (o *Object) Remove(ctx context.Context) error {
 	return nil
 }
 
-// SetModTime sets the modification time of the local fs object
+// SetModTime sets the metadata on the object to set the modification date
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	o.modTime = modTime
 	return nil
 }
 
-// Storable returns whether this object is storable
+// Storable says whether this object can be stored
 func (o *Object) Storable() bool {
 	return true
 }
 
 // Update in to the object with the modTime given of the given size
+//
+// When called from outside an Fs by rclone, src.Size() will always be >= 0.
+// But for unknown-sized objects (indicated by src.Size() == -1), Upload should either
+// return an error or update the object properly (rather than e.g. calling panic).
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
 	f := o.fs
 	obj, err := f.NewObject(ctx, src.Remote())
@@ -1183,7 +1209,8 @@ var (
 	_ fs.DirMover = (*Fs)(nil)
 	// _ fs.PublicLinker = (*Fs)(nil)
 	// _ fs.CleanUpper   = (*Fs)(nil)
-	_ fs.Abouter = (*Fs)(nil)
-	_ fs.Object  = (*Object)(nil)
+	_ fs.Abouter    = (*Fs)(nil)
+	_ fs.Object     = (*Object)(nil)
+	_ fs.ObjectInfo = (*Object)(nil)
 	// _ fs.MimeTyper = (*Object)(nil)
 )
