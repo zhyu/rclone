@@ -2,15 +2,21 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"io"
+	"strings"
 )
 
 var (
+	hashPreSize int64 = 128 * 1024
+
 	xorKeySeed = []byte{
 		0xf0, 0xe5, 0x69, 0xae, 0xbf, 0xdc, 0xbf, 0x5a,
 		0x1a, 0x45, 0xe8, 0xbe, 0x7d, 0xa6, 0x73, 0x88,
@@ -64,6 +70,13 @@ var (
 
 type Key [16]byte
 
+type DigestResult struct {
+	Size    int64
+	PreId   string
+	QuickId string
+	MD5     string
+}
+
 func init() {
 	block, _ := pem.Decode(rsaPrivateKey)
 	rsaClientKey, _ = x509.ParsePKCS1PrivateKey(block.Bytes)
@@ -100,6 +113,31 @@ func Decode(input string, key Key) (output []byte, err error) {
 	reverseBytes(output)
 	xorTransform(output, xorDeriveKey(key[:], 4))
 	return
+}
+
+func Digest(r io.Reader, result *DigestResult) error {
+	hs, hm := sha1.New(), md5.New()
+	w := io.MultiWriter(hs, hm)
+	// Calculate SHA1 hash of first 128K, which is used as PreId
+	var err error
+	result.Size, err = io.CopyN(w, r, hashPreSize)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	result.PreId = strings.ToUpper(hex.EncodeToString(hs.Sum(nil)))
+	// Write remain data.
+	if err == nil {
+		var n int64
+		if n, err = io.Copy(w, r); err != nil {
+			return err
+		}
+		result.Size += n
+		result.QuickId = strings.ToUpper(hex.EncodeToString(hs.Sum(nil)))
+	} else {
+		result.QuickId = result.PreId
+	}
+	result.MD5 = base64.StdEncoding.EncodeToString(hm.Sum(nil))
+	return nil
 }
 
 func xorDeriveKey(seed []byte, size int) []byte {

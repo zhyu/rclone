@@ -1,17 +1,23 @@
 package _115
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -28,13 +34,41 @@ import (
 )
 
 const (
-	// userAgent = "Mozilla/5.0 115Browser/23.9.3"
-	userAgent = "Mozilla/5.0 115Browser/8.6.2"
+	userAgent = "Mozilla/5.0 115Browser/23.9.3"
 
-	minSleep      = 100 * time.Millisecond
+	minSleep      = 200 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
+
+var (
+	GMT, _ = time.LoadLocation("GMT")
+)
+
+type WriterEx struct {
+	w io.Writer
+}
+
+func (w *WriterEx) Write(p []byte) (n int, err error) {
+	return w.w.Write(p)
+}
+
+func (w *WriterEx) WriteString(s string) (n int, err error) {
+	return w.Write([]byte(s))
+}
+
+func (w *WriterEx) WriteByte(b byte) (err error) {
+	_, err = w.Write([]byte{b})
+	return
+}
+
+func (w *WriterEx) MustWriteString(s ...string) {
+	for _, item := range s {
+		if _, err := w.WriteString(item); err != nil {
+			break
+		}
+	}
+}
 
 // Register with Fs
 func init() {
@@ -173,6 +207,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 	}).Fill(ctx, f)
 
 	// TODO: login check
+	fs.Logf(f, "options_begin: %+v", opt)
 
 	return f, nil
 }
@@ -199,7 +234,7 @@ func (f *Fs) Features() *fs.Features {
 
 // Precision return the precision of this Fs
 func (f *Fs) Precision() time.Duration {
-	return time.Second
+	return fs.ModTimeNotSupported
 }
 
 // Hashes returns the supported hash sets.
@@ -234,12 +269,71 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 }
 
 // Put in to the remote path with the modTime given of the given size
+//
+// When called from outside an Fs by rclone, src.Size() will always be >= 0.
+// But for unknown-sized objects (indicated by src.Size() == -1), Put should either
+// return an error or upload it properly (rather than e.g. calling panic).
+//
+// May create the object even if it returns an error - if so
+// will return the object and the error, otherwise will return
+// nil and the error
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	if src.Size() == 0 {
 		return nil, fs.ErrorCantUploadEmptyFiles
 	}
 
-	return nil, fs.ErrorNotImplemented
+	if true {
+		parent, _ := path.Split(src.Remote())
+		err := f.Mkdir(ctx, parent)
+		if err != nil {
+			fs.Logf(f, "put mkdir fail, err: %v, parent: %v", err, parent)
+			return nil, err
+		}
+	}
+
+	parent, name := path.Split(f.remotePath(src.Remote()))
+	cid, err := f.getDirID(ctx, parent)
+	if err != nil {
+		fs.Logf(f, "put get dir id fail, parent: %v", parent)
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	tee := io.TeeReader(in, &buf)
+	url, token, err := f.createUploadTicket(ctx, cid, name, tee)
+	if err != nil {
+		return nil, err
+	}
+	fs.Logf(f, "put, parent: %v, name: %v, url: %v, token: %+v", parent, name, url, token)
+
+	opts := rest.Opts{
+		RootURL:      url,
+		Method:       http.MethodPut,
+		ContentType:  DetermineMimeType(name),
+		Body:         &buf,
+		ExtraHeaders: token,
+	}
+
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.Call(ctx, &opts)
+		fs.Logf(f, "resp: %v, err: %v, name: %v", resp, err, name)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	f.flushDir(parent)
+	o, err := f.NewObject(ctx, src.Remote())
+	fs.Logf(f, "NewObject, remote: %v, parent: %v, err: %v", src.Remote(), parent, err)
+	if err != nil {
+		return nil, err
+	}
+
+	o.SetModTime(ctx, src.ModTime(ctx))
+	fs.Logf(f, "mod_time: %v", o.ModTime(ctx))
+	return o, nil
 }
 
 // Mkdir creates the container if it doesn't exist
@@ -366,6 +460,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Rmdir deletes the container
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
+	fs.Logf(f, "rmdir, dir: %v", dir)
 	return f.Purge(ctx, dir)
 }
 
@@ -455,20 +550,25 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 
 func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
 	remotePath := f.remotePath(fullpath)
+	fs.Logf(f, "readMetaDataForPath, path: %v", remotePath)
 	if remotePath == "/" {
 		return &api.FileInfo{CategoryID: "0"}, nil
 	}
 
 	remoteDir, filename := path.Split(remotePath)
 	infos, err := f.readDir(ctx, remoteDir)
+	fs.Logf(f, "readDir, remoteDir: %v, filename: %v", remoteDir, filename)
 	if err != nil {
 		if errors.Is(err, fs.ErrorDirNotFound) {
+			fs.Logf(f, "dir not found")
 			return nil, fs.ErrorObjectNotFound
 		}
+		fs.Logf(f, "dir not found2")
 		return nil, err
 	}
 
 	for _, info := range infos {
+		fs.Logf(f, "infos: %+v", info)
 		if info.GetName() == filename {
 			return info, nil
 		}
@@ -478,7 +578,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.Fil
 }
 
 func (f *Fs) readDir(ctx context.Context, remoteDir string) ([]*api.FileInfo, error) {
-	cacheKey := fmt.Sprintf("files:%s", remoteDir)
+	cacheKey := fmt.Sprintf("files:%s", path.Clean(remoteDir))
 	if value, ok := f.cache.Get(cacheKey); ok {
 		return value.([]*api.FileInfo), nil
 	}
@@ -519,7 +619,7 @@ func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
 		MultipartParams: url.Values{},
 	}
 	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
-	opts.MultipartParams.Set("cname", name)
+	opts.MultipartParams.Set("cname", f.opt.Enc.FromStandardName(name))
 
 	var err error
 	var info api.MkdirResponse
@@ -536,7 +636,7 @@ func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
 			fs.Logf(f, "make dir exists, pid: %v, name: %v, err: %v", pid, name, info.Error)
 			return fs.ErrorDirExists
 		}
-		fs.Logf(f, "make dir fail, pid: %v, name: %v, err: %v", pid, name, info.Error)
+		fs.Logf(f, "make dir fail, pid: %v, name: %v, err: %v, errno: %v", pid, name, info.Error, info.Errno)
 		return nil
 	}
 
@@ -549,7 +649,7 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 		Path:       "/files/getid",
 		Parameters: url.Values{},
 	}
-	opts.Parameters.Set("path", remoteDir)
+	opts.Parameters.Set("path", f.opt.Enc.FromStandardPath(remoteDir))
 
 	var err error
 	var info api.GetDirIDResponse
@@ -745,6 +845,142 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	return "", fs.ErrorObjectNotFound
 }
 
+func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in io.Reader) (string, map[string]string, error) {
+	fs.Logf(f, "create upload ticket, cid: %v, name: %v", cid, name)
+	dr := &crypto.DigestResult{}
+	err := crypto.Digest(in, dr)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if dr.Size > 5*1024*1024*1024 {
+		// FIXME
+		return "", nil, fs.ErrorCantMove
+	}
+
+	uploadInfo, err := f.getUploadInfo(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+
+	opts := rest.Opts{
+		Method:          http.MethodPost,
+		RootURL:         "https://uplb.115.com",
+		Path:            "/3.0/initupload.php",
+		Parameters:      url.Values{},
+		MultipartParams: url.Values{},
+	}
+	targetID := fmt.Sprintf("U_1_%d", cid)
+	opts.Parameters.Set("appid", uploadInfo.AppID.String())
+	opts.Parameters.Set("appversion", uploadInfo.AppVersion.String())
+	opts.Parameters.Set("isp", strconv.FormatInt(uploadInfo.IspType, 10))
+	opts.Parameters.Set("sig", f.uploadCalculateSignature(uploadInfo.UserID, uploadInfo.UserKey, targetID, dr.QuickId))
+	opts.Parameters.Set("format", "json")
+	opts.Parameters.Set("t", strconv.FormatInt(time.Now().Unix(), 10))
+
+	opts.MultipartParams.Set("app_ver", uploadInfo.AppVersion.String())
+	opts.MultipartParams.Set("preID", dr.PreId)
+	opts.MultipartParams.Set("quickid", dr.QuickId)
+	opts.MultipartParams.Set("target", targetID)
+	opts.MultipartParams.Set("fileid", dr.QuickId)
+	opts.MultipartParams.Set("filename", name)
+	opts.MultipartParams.Set("filesize", strconv.FormatInt(dr.Size, 10))
+	opts.MultipartParams.Set("userid", strconv.FormatInt(uploadInfo.UserID, 10))
+
+	var info api.UploadInitResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	fs.Logf(f, "upload init response: %+v", info)
+
+	uploadToken, err := f.getUploadToken(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+
+	extraHeaders := make(map[string]string)
+	extraHeaders["Date"] = time.Now().In(GMT).Format(time.RFC1123)
+	extraHeaders["Content-Length"] = strconv.FormatInt(dr.Size, 10)
+	extraHeaders["Content-Type"] = DetermineMimeType(name)
+	extraHeaders["Content-MD5"] = dr.MD5
+	extraHeaders["X-OSS-Callback"] = base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))
+	extraHeaders["X-OSS-Callback-Var"] = base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))
+	extraHeaders["X-OSS-Security-Token"] = uploadToken.SecurityToken
+	extraHeaders["Authorization"] = CalculateAuthorization(&RequestMetadata{
+		Verb:   http.MethodPut,
+		Header: extraHeaders,
+		Bucket: info.Bucket,
+		Object: info.Object,
+	}, uploadToken.AccessKeyId, uploadToken.AccessKeySecret)
+
+	url := fmt.Sprintf("https://%s.%s/%s", info.Bucket, "oss-cn-shenzhen.aliyuncs.com", info.Object)
+
+	return url, extraHeaders, nil
+}
+
+func (f *Fs) uploadCalculateSignature(userID int64, userKey string, targetID string, fileID string) string {
+	digester := sha1.New()
+	wx := &WriterEx{w: digester}
+	wx.MustWriteString(strconv.FormatInt(userID, 10), fileID, fileID, targetID, "0")
+	h := hex.EncodeToString(digester.Sum(nil))
+	// Second pass
+	digester.Reset()
+	wx.MustWriteString(userKey, h, "000000")
+	return strings.ToUpper(hex.EncodeToString(digester.Sum(nil)))
+}
+
+func (f *Fs) getUploadInfo(ctx context.Context) (*api.UploadInfoResponse, error) {
+	opts := rest.Opts{
+		Method:  http.MethodGet,
+		RootURL: "https://proapi.115.com",
+		Path:    "/app/uploadinfo",
+	}
+
+	var err error
+	var info api.UploadInfoResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fs.Logf(f, "get upload info response: %+v", info)
+
+	return &info, nil
+}
+
+func (f *Fs) getUploadToken(ctx context.Context) (*api.UploadOssTokenResponse, error) {
+	opts := rest.Opts{
+		Method:  http.MethodGet,
+		RootURL: "https://uplb.115.com",
+		Path:    "/3.0/gettoken.php",
+	}
+
+	var err error
+	var info api.UploadOssTokenResponse
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &info)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fs.Logf(f, "get upload token response: %+v", info)
+
+	return &info, nil
+}
+
 func (f *Fs) indexInfo(ctx context.Context) (*api.IndexInfoResponse, error) {
 	opts := rest.Opts{
 		Method: http.MethodGet,
@@ -775,6 +1011,7 @@ func (f *Fs) remotePath(name string) string {
 
 func (f *Fs) flushDir(dir string) {
 	cacheKey := fmt.Sprintf("files:%v", path.Clean(dir))
+	fs.Logf(f, "flushDir, cache key: %v", cacheKey)
 	f.cache.Delete(cacheKey)
 }
 
@@ -816,10 +1053,6 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	}
 	return o.sha1sum, nil
 }
-
-var bodylist = make([]io.ReadCloser, 2, 2)
-var bodyindex = 0
-var bodylock = sync.Mutex{}
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
@@ -873,7 +1106,8 @@ func (o *Object) Remove(ctx context.Context) error {
 
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	return fs.ErrorNotImplemented
+	o.modTime = modTime
+	return nil
 }
 
 // Storable returns whether this object is storable
@@ -889,7 +1123,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 // setMetaData sets the metadata from info
 func (o *Object) setMetaData(info *api.FileInfo) error {
 	o.hasMetaData = true
-	o.name = info.GetName()
+	o.name = o.fs.opt.Enc.ToStandardName(info.GetName())
 	o.size = info.GetSize()
 	o.sha1sum = strings.ToLower(info.Sha1)
 	o.pickCode = info.PickCode
@@ -928,3 +1162,186 @@ var (
 	_ fs.Object  = (*Object)(nil)
 	// _ fs.MimeTyper = (*Object)(nil)
 )
+
+func DetermineMimeType(name string) string {
+	if ext := path.Ext(name); ext != "" {
+		if mt := mime.TypeByExtension(ext); mt != "" {
+			return mt
+		}
+	}
+	return "application/octet-stream"
+}
+
+var (
+	signingKeyMap = map[string]bool{
+		"acl":                          true,
+		"uploads":                      true,
+		"location":                     true,
+		"cors":                         true,
+		"logging":                      true,
+		"website":                      true,
+		"referer":                      true,
+		"lifecycle":                    true,
+		"delete":                       true,
+		"append":                       true,
+		"tagging":                      true,
+		"objectMeta":                   true,
+		"uploadId":                     true,
+		"partNumber":                   true,
+		"security-token":               true,
+		"position":                     true,
+		"img":                          true,
+		"style":                        true,
+		"styleName":                    true,
+		"replication":                  true,
+		"replicationProgress":          true,
+		"replicationLocation":          true,
+		"cname":                        true,
+		"bucketInfo":                   true,
+		"comp":                         true,
+		"qos":                          true,
+		"live":                         true,
+		"status":                       true,
+		"vod":                          true,
+		"startTime":                    true,
+		"endTime":                      true,
+		"symlink":                      true,
+		"x-oss-process":                true,
+		"response-content-type":        true,
+		"x-oss-traffic-limit":          true,
+		"response-content-language":    true,
+		"response-expires":             true,
+		"response-cache-control":       true,
+		"response-content-disposition": true,
+		"response-content-encoding":    true,
+		"udf":                          true,
+		"udfName":                      true,
+		"udfImage":                     true,
+		"udfId":                        true,
+		"udfImageDesc":                 true,
+		"udfApplication":               true,
+		"udfApplicationLog":            true,
+		"restore":                      true,
+		"callback":                     true,
+		"callback-var":                 true,
+		"qosInfo":                      true,
+		"policy":                       true,
+		"stat":                         true,
+		"encryption":                   true,
+		"versions":                     true,
+		"versioning":                   true,
+		"versionId":                    true,
+		"requestPayment":               true,
+		"x-oss-request-payer":          true,
+		"sequential":                   true,
+		"inventory":                    true,
+		"inventoryId":                  true,
+		"continuation-token":           true,
+		"asyncFetch":                   true,
+		"worm":                         true,
+		"wormId":                       true,
+		"wormExtend":                   true,
+		"withHashContext":              true,
+		"x-oss-enable-md5":             true,
+		"x-oss-enable-sha1":            true,
+		"x-oss-enable-sha256":          true,
+		"x-oss-hash-ctx":               true,
+		"x-oss-md5-ctx":                true,
+		"transferAcceleration":         true,
+		"regionList":                   true,
+	}
+)
+
+type RequestMetadata struct {
+	// Request verb
+	Verb string
+	// Request header
+	Header map[string]string
+	// OSS bucket name
+	Bucket string
+	// OSS object name
+	Object string
+	// OSS Parameters
+	Params map[string]string
+}
+
+type Pair struct {
+	First string
+	Last  string
+}
+
+type Pairs []*Pair
+
+func (h Pairs) Len() int {
+	return len(h)
+}
+
+func (h Pairs) Less(i, j int) bool {
+	return bytes.Compare([]byte(h[i].First), []byte(h[j].First)) < 0
+}
+
+func (h Pairs) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func sortPairs(pairs []*Pair) {
+	sort.Sort(Pairs(pairs))
+}
+
+// CalculateAuthorization calculates authorization for OSS request
+func CalculateAuthorization(metadata *RequestMetadata, keyId string, keySecret string) string {
+	// Create signer
+	signer := hmac.New(sha1.New, []byte(keySecret))
+	wx := &WriterEx{w: signer}
+
+	// Common parameters
+	contentMd5 := metadata.Header["Content-MD5"]
+	contentType := metadata.Header["Content-Type"]
+	date := metadata.Header["Date"]
+	wx.MustWriteString(metadata.Verb, "\n", contentMd5, "\n", contentType, "\n", date, "\n")
+
+	// Canonicalized OSS Headers
+	headers := make([]*Pair, 0, len(metadata.Header))
+	for name, value := range metadata.Header {
+		name = strings.ToLower(name)
+		if strings.HasPrefix(name, "x-oss-") {
+			headers = append(headers, &Pair{
+				First: name,
+				Last:  value,
+			})
+		}
+	}
+	sortPairs(headers)
+	for _, header := range headers {
+		wx.MustWriteString(header.First, ":", header.Last, "\n")
+	}
+
+	// Canonicalized Resource
+	wx.MustWriteString("/", metadata.Bucket, "/", metadata.Object)
+	// Sub resources
+	if metadata.Params != nil && len(metadata.Params) > 0 {
+		params := make([]*Pair, 0, len(metadata.Params))
+		for name, value := range metadata.Params {
+			if _, ok := signingKeyMap[name]; ok {
+				params = append(params, &Pair{
+					First: name,
+					Last:  value,
+				})
+			}
+		}
+		sortPairs(params)
+		for index, param := range params {
+			if index == 0 {
+				wx.MustWriteString("?", param.First)
+			} else {
+				wx.MustWriteString("&", param.First)
+			}
+			if param.Last != "" {
+				wx.MustWriteString("=", param.Last)
+			}
+		}
+	}
+
+	signature := base64.StdEncoding.EncodeToString(signer.Sum(nil))
+	return fmt.Sprintf("OSS %s:%s", keyId, signature)
+}

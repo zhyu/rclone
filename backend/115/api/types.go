@@ -10,6 +10,47 @@ type BaseResponse struct {
 	State bool   `json:"state"`
 }
 
+type UploadInfoResponse struct {
+	Error       string      `json:"error,omitempty"`
+	State       bool        `json:"state"`
+	AppID       json.Number `json:"app_id"`
+	AppVersion  json.Number `json:"app_version"`
+	UploadLimit int64       `json:"size_limit"`
+	IspType     int64       `json:"isp_type"`
+	UserID      int64       `json:"user_id"`
+	UserKey     string      `json:"userkey"`
+}
+
+type UploadInitResponse struct {
+	Request   string `json:"request"`
+	ErrorCode int    `json:"statuscode"`
+	ErrorMsg  string `json:"statusmsg"`
+
+	Status   json.Number `json:"status"`
+	PickCode string      `json:"pickcode"`
+
+	// OSS upload fields
+	Bucket   string `json:"bucket"`
+	Object   string `json:"object"`
+	Callback struct {
+		Callback    string `json:"callback"`
+		CallbackVar string `json:"callback_var"`
+	} `json:"callback"`
+
+	// Useless fields
+	FileId   int    `json:"fileid"`
+	FileInfo string `json:"fileinfo"`
+	Target   string `json:"target"`
+}
+
+type UploadOssTokenResponse struct {
+    StatusCode      string `json:"StatusCode"`
+    AccessKeyId     string `json:"AccessKeyId"`
+    AccessKeySecret string `json:"AccessKeySecret"`
+    SecurityToken   string `json:"SecurityToken"`
+    Expiration      string `json:"Expiration"`                                                                                               
+}
+
 type GetFilesResponse struct {
 	AreaID     string      `json:"aid"`
 	CategoryID json.Number `json:"cid"`
