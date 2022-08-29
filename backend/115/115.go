@@ -64,6 +64,7 @@ func init() {
 			Advanced: true,
 			Default: (encoder.Display |
 				encoder.EncodeLeftSpace |
+				encoder.EncodeRightSpace |
 				encoder.EncodeBackSlash |
 				encoder.EncodeSlash |
 				encoder.EncodeColon |
@@ -72,6 +73,7 @@ func init() {
 				encoder.EncodeDoubleQuote |
 				encoder.EncodeLtGt |
 				encoder.EncodePipe |
+				encoder.EncodePercent |
 				encoder.EncodeInvalidUtf8),
 		}},
 	})
@@ -243,7 +245,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 	files := make([]fs.DirEntry, 0, len(infos))
 	for _, info := range infos {
-		remote := path.Join(dir, info.GetName())
+		remote := path.Join(dir, f.opt.Enc.ToStandardName(info.GetName()))
 		file, err := f.itemToDirEntry(ctx, remote, info)
 		if err != nil {
 			return nil, err
@@ -541,7 +543,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, remotePath string) (*api.F
 	}
 
 	for _, info := range infos {
-		if info.GetName() == filename {
+		if f.opt.Enc.ToStandardName(info.GetName()) == filename {
 			return info, nil
 		}
 	}
@@ -584,7 +586,6 @@ func (f *Fs) readDir(ctx context.Context, remoteDir string) ([]*api.FileInfo, er
 }
 
 func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
-	fs.Logf(f, "make dir, pid: %v, name: %v", pid, name)
 	opts := rest.Opts{
 		Method:          http.MethodPost,
 		Path:            "/files/add",
@@ -855,7 +856,7 @@ func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in 
 	opts.MultipartParams.Set("quickid", dr.QuickId)
 	opts.MultipartParams.Set("target", targetID)
 	opts.MultipartParams.Set("fileid", dr.QuickId)
-	opts.MultipartParams.Set("filename", name)
+	opts.MultipartParams.Set("filename", f.opt.Enc.FromStandardName(name))
 	opts.MultipartParams.Set("filesize", strconv.FormatInt(dr.Size, 10))
 	opts.MultipartParams.Set("userid", strconv.FormatInt(uploadInfo.UserID, 10))
 
@@ -889,8 +890,6 @@ func (f *Fs) getUploadInfo(ctx context.Context) (*api.UploadInfoResponse, error)
 	if err != nil {
 		return nil, err
 	}
-
-	fs.Logf(f, "get upload info response: %+v", info)
 
 	return &info, nil
 }
