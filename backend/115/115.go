@@ -3,7 +3,6 @@ package _115
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,15 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/patrickmn/go-cache"
 	"github.com/rclone/rclone/backend/115/api"
 	"github.com/rclone/rclone/backend/115/crypto"
@@ -36,39 +34,10 @@ import (
 const (
 	userAgent = "Mozilla/5.0 115Browser/23.9.3"
 
-	minSleep      = 200 * time.Millisecond
+	minSleep      = 150 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
-
-var (
-	GMT, _ = time.LoadLocation("GMT")
-)
-
-type WriterEx struct {
-	w io.Writer
-}
-
-func (w *WriterEx) Write(p []byte) (n int, err error) {
-	return w.w.Write(p)
-}
-
-func (w *WriterEx) WriteString(s string) (n int, err error) {
-	return w.Write([]byte(s))
-}
-
-func (w *WriterEx) WriteByte(b byte) (err error) {
-	_, err = w.Write([]byte{b})
-	return
-}
-
-func (w *WriterEx) MustWriteString(s ...string) {
-	for _, item := range s {
-		if _, err := w.WriteString(item); err != nil {
-			break
-		}
-	}
-}
 
 // Register with Fs
 func init() {
@@ -93,6 +62,7 @@ func init() {
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
 			Default: (encoder.Display |
+				encoder.EncodeLeftSpace |
 				encoder.EncodeBackSlash |
 				encoder.EncodeSlash |
 				encoder.EncodeColon |
@@ -116,14 +86,15 @@ type Options struct {
 
 // Fs represents a remote 115 drive
 type Fs struct {
-	name     string
-	root     string
-	opt      Options
-	ci       *fs.ConfigInfo
-	features *fs.Features
-	srv      *rest.Client
-	pacer    *fs.Pacer
-	cache    *cache.Cache
+	name      string
+	root      string
+	opt       Options
+	ci        *fs.ConfigInfo
+	features  *fs.Features
+	srv       *rest.Client
+	pacer     *fs.Pacer
+	cache     *cache.Cache
+	ossClient *oss.Client
 }
 
 // Object describes a 115 object
@@ -206,8 +177,16 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
-	// TODO: login check
-	fs.Logf(f, "options_begin: %+v", opt)
+	uploadToken, err := f.getUploadToken(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	// init oss client
+	f.ossClient, err = oss.New("https://oss-cn-shenzhen.aliyuncs.com", uploadToken.AccessKeyId, uploadToken.AccessKeySecret, oss.SecurityToken(uploadToken.SecurityToken), oss.EnableMD5(true))
+	if err != nil {
+		panic(err)
+	}
 
 	return f, nil
 }
@@ -300,28 +279,28 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 	var buf bytes.Buffer
 	tee := io.TeeReader(in, &buf)
-	url, token, err := f.createUploadTicket(ctx, cid, name, tee)
+	info, dr, err := f.createUploadTicket(ctx, cid, name, tee)
 	if err != nil {
 		return nil, err
 	}
-	fs.Logf(f, "put, parent: %v, name: %v, url: %v, token: %+v", parent, name, url, token)
+	fs.Logf(f, "put, parent: %v, name: %v, info: %+v, dr: %+v", parent, name, info, dr)
 
-	opts := rest.Opts{
-		RootURL:      url,
-		Method:       http.MethodPut,
-		ContentType:  DetermineMimeType(name),
-		Body:         &buf,
-		ExtraHeaders: token,
+	bucket, err := f.ossClient.Bucket(info.Bucket)
+	if err != nil {
+		fs.Logf(f, "f.oss.Bucket fail, err: %v", err)
+		return nil, err
 	}
 
-	var resp *http.Response
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.Call(ctx, &opts)
-		fs.Logf(f, "resp: %v, err: %v, name: %v", resp, err, name)
-		return shouldRetry(ctx, resp, err)
-	})
+	uploadOptions := []oss.Option{
+		oss.ContentLength(dr.Size),
+		oss.ContentLanguage(fs.MimeTypeFromName(name)),
+		oss.ContentMD5(dr.MD5),
+		oss.Callback(base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))),
+		oss.CallbackVar(base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))),
+	}
+	err = bucket.PutObject(info.Object, &buf, uploadOptions...)
 	if err != nil {
-		return nil, err
+		fs.Logf(f, "bucket.PutObject fail, err: %v", err)
 	}
 
 	f.flushDir(parent)
@@ -331,8 +310,6 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return nil, err
 	}
 
-	o.SetModTime(ctx, src.ModTime(ctx))
-	fs.Logf(f, "mod_time: %v", o.ModTime(ctx))
 	return o, nil
 }
 
@@ -520,7 +497,8 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 	}
 	if object.IsDir() {
 		t := object.GetUpdateTime()
-		d := fs.NewDir(remote, t)
+		// d := fs.NewDir(remote, t)
+		d := fs.NewDir(f.opt.Enc.ToStandardPath(remote), t)
 		return d, nil
 	} else {
 		o, err := f.newObjectWithInfo(ctx, remote, object)
@@ -550,25 +528,20 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 
 func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
 	remotePath := f.remotePath(fullpath)
-	fs.Logf(f, "readMetaDataForPath, path: %v", remotePath)
 	if remotePath == "/" {
 		return &api.FileInfo{CategoryID: "0"}, nil
 	}
 
 	remoteDir, filename := path.Split(remotePath)
 	infos, err := f.readDir(ctx, remoteDir)
-	fs.Logf(f, "readDir, remoteDir: %v, filename: %v", remoteDir, filename)
 	if err != nil {
 		if errors.Is(err, fs.ErrorDirNotFound) {
-			fs.Logf(f, "dir not found")
 			return nil, fs.ErrorObjectNotFound
 		}
-		fs.Logf(f, "dir not found2")
 		return nil, err
 	}
 
 	for _, info := range infos {
-		fs.Logf(f, "infos: %+v", info)
 		if info.GetName() == filename {
 			return info, nil
 		}
@@ -620,6 +593,7 @@ func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
 	}
 	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
 	opts.MultipartParams.Set("cname", f.opt.Enc.FromStandardName(name))
+	fs.Logf(f, "cname: %v, cname: %v", name, f.opt.Enc.FromStandardName(name))
 
 	var err error
 	var info api.MkdirResponse
@@ -650,6 +624,7 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 		Parameters: url.Values{},
 	}
 	opts.Parameters.Set("path", f.opt.Enc.FromStandardPath(remoteDir))
+	fs.Logf(f, "getDirID cname: %v, cname: %v", remoteDir, f.opt.Enc.FromStandardPath(remoteDir))
 
 	var err error
 	var info api.GetDirIDResponse
@@ -662,6 +637,7 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 		return -1, err
 	}
 	if !info.State || (remoteDir != "/" && info.CategoryID.String() == "0") {
+		fs.Logf(f, "get dir id fail, not state, error: %v, errno: %v, resp: %+v", info.Error, info.Errno, info)
 		return -1, fs.ErrorDirNotFound
 	}
 
@@ -845,22 +821,17 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	return "", fs.ErrorObjectNotFound
 }
 
-func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in io.Reader) (string, map[string]string, error) {
+func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in io.Reader) (*api.UploadInitResponse, *crypto.DigestResult, error) {
 	fs.Logf(f, "create upload ticket, cid: %v, name: %v", cid, name)
 	dr := &crypto.DigestResult{}
 	err := crypto.Digest(in, dr)
 	if err != nil {
-		return "", nil, err
-	}
-
-	if dr.Size > 5*1024*1024*1024 {
-		// FIXME
-		return "", nil, fs.ErrorCantMove
+		return nil, nil, err
 	}
 
 	uploadInfo, err := f.getUploadInfo(ctx)
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 
 	opts := rest.Opts{
@@ -894,44 +865,25 @@ func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in 
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 
 	fs.Logf(f, "upload init response: %+v", info)
-
-	uploadToken, err := f.getUploadToken(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-
-	extraHeaders := make(map[string]string)
-	extraHeaders["Date"] = time.Now().In(GMT).Format(time.RFC1123)
-	extraHeaders["Content-Length"] = strconv.FormatInt(dr.Size, 10)
-	extraHeaders["Content-Type"] = DetermineMimeType(name)
-	extraHeaders["Content-MD5"] = dr.MD5
-	extraHeaders["X-OSS-Callback"] = base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))
-	extraHeaders["X-OSS-Callback-Var"] = base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))
-	extraHeaders["X-OSS-Security-Token"] = uploadToken.SecurityToken
-	extraHeaders["Authorization"] = CalculateAuthorization(&RequestMetadata{
-		Verb:   http.MethodPut,
-		Header: extraHeaders,
-		Bucket: info.Bucket,
-		Object: info.Object,
-	}, uploadToken.AccessKeyId, uploadToken.AccessKeySecret)
-
-	url := fmt.Sprintf("https://%s.%s/%s", info.Bucket, "oss-cn-shenzhen.aliyuncs.com", info.Object)
-
-	return url, extraHeaders, nil
+	return &info, dr, nil
 }
 
 func (f *Fs) uploadCalculateSignature(userID int64, userKey string, targetID string, fileID string) string {
 	digester := sha1.New()
-	wx := &WriterEx{w: digester}
-	wx.MustWriteString(strconv.FormatInt(userID, 10), fileID, fileID, targetID, "0")
+	digester.Write([]byte(strconv.FormatInt(userID, 10)))
+	digester.Write([]byte(fileID))
+	digester.Write([]byte(fileID))
+	digester.Write([]byte(targetID))
+	digester.Write([]byte("0"))
 	h := hex.EncodeToString(digester.Sum(nil))
-	// Second pass
 	digester.Reset()
-	wx.MustWriteString(userKey, h, "000000")
+	digester.Write([]byte(userKey))
+	digester.Write([]byte(h))
+	digester.Write([]byte("000000"))
 	return strings.ToUpper(hex.EncodeToString(digester.Sum(nil)))
 }
 
@@ -1162,186 +1114,3 @@ var (
 	_ fs.Object  = (*Object)(nil)
 	// _ fs.MimeTyper = (*Object)(nil)
 )
-
-func DetermineMimeType(name string) string {
-	if ext := path.Ext(name); ext != "" {
-		if mt := mime.TypeByExtension(ext); mt != "" {
-			return mt
-		}
-	}
-	return "application/octet-stream"
-}
-
-var (
-	signingKeyMap = map[string]bool{
-		"acl":                          true,
-		"uploads":                      true,
-		"location":                     true,
-		"cors":                         true,
-		"logging":                      true,
-		"website":                      true,
-		"referer":                      true,
-		"lifecycle":                    true,
-		"delete":                       true,
-		"append":                       true,
-		"tagging":                      true,
-		"objectMeta":                   true,
-		"uploadId":                     true,
-		"partNumber":                   true,
-		"security-token":               true,
-		"position":                     true,
-		"img":                          true,
-		"style":                        true,
-		"styleName":                    true,
-		"replication":                  true,
-		"replicationProgress":          true,
-		"replicationLocation":          true,
-		"cname":                        true,
-		"bucketInfo":                   true,
-		"comp":                         true,
-		"qos":                          true,
-		"live":                         true,
-		"status":                       true,
-		"vod":                          true,
-		"startTime":                    true,
-		"endTime":                      true,
-		"symlink":                      true,
-		"x-oss-process":                true,
-		"response-content-type":        true,
-		"x-oss-traffic-limit":          true,
-		"response-content-language":    true,
-		"response-expires":             true,
-		"response-cache-control":       true,
-		"response-content-disposition": true,
-		"response-content-encoding":    true,
-		"udf":                          true,
-		"udfName":                      true,
-		"udfImage":                     true,
-		"udfId":                        true,
-		"udfImageDesc":                 true,
-		"udfApplication":               true,
-		"udfApplicationLog":            true,
-		"restore":                      true,
-		"callback":                     true,
-		"callback-var":                 true,
-		"qosInfo":                      true,
-		"policy":                       true,
-		"stat":                         true,
-		"encryption":                   true,
-		"versions":                     true,
-		"versioning":                   true,
-		"versionId":                    true,
-		"requestPayment":               true,
-		"x-oss-request-payer":          true,
-		"sequential":                   true,
-		"inventory":                    true,
-		"inventoryId":                  true,
-		"continuation-token":           true,
-		"asyncFetch":                   true,
-		"worm":                         true,
-		"wormId":                       true,
-		"wormExtend":                   true,
-		"withHashContext":              true,
-		"x-oss-enable-md5":             true,
-		"x-oss-enable-sha1":            true,
-		"x-oss-enable-sha256":          true,
-		"x-oss-hash-ctx":               true,
-		"x-oss-md5-ctx":                true,
-		"transferAcceleration":         true,
-		"regionList":                   true,
-	}
-)
-
-type RequestMetadata struct {
-	// Request verb
-	Verb string
-	// Request header
-	Header map[string]string
-	// OSS bucket name
-	Bucket string
-	// OSS object name
-	Object string
-	// OSS Parameters
-	Params map[string]string
-}
-
-type Pair struct {
-	First string
-	Last  string
-}
-
-type Pairs []*Pair
-
-func (h Pairs) Len() int {
-	return len(h)
-}
-
-func (h Pairs) Less(i, j int) bool {
-	return bytes.Compare([]byte(h[i].First), []byte(h[j].First)) < 0
-}
-
-func (h Pairs) Swap(i, j int) {
-	h[i], h[j] = h[j], h[i]
-}
-
-func sortPairs(pairs []*Pair) {
-	sort.Sort(Pairs(pairs))
-}
-
-// CalculateAuthorization calculates authorization for OSS request
-func CalculateAuthorization(metadata *RequestMetadata, keyId string, keySecret string) string {
-	// Create signer
-	signer := hmac.New(sha1.New, []byte(keySecret))
-	wx := &WriterEx{w: signer}
-
-	// Common parameters
-	contentMd5 := metadata.Header["Content-MD5"]
-	contentType := metadata.Header["Content-Type"]
-	date := metadata.Header["Date"]
-	wx.MustWriteString(metadata.Verb, "\n", contentMd5, "\n", contentType, "\n", date, "\n")
-
-	// Canonicalized OSS Headers
-	headers := make([]*Pair, 0, len(metadata.Header))
-	for name, value := range metadata.Header {
-		name = strings.ToLower(name)
-		if strings.HasPrefix(name, "x-oss-") {
-			headers = append(headers, &Pair{
-				First: name,
-				Last:  value,
-			})
-		}
-	}
-	sortPairs(headers)
-	for _, header := range headers {
-		wx.MustWriteString(header.First, ":", header.Last, "\n")
-	}
-
-	// Canonicalized Resource
-	wx.MustWriteString("/", metadata.Bucket, "/", metadata.Object)
-	// Sub resources
-	if metadata.Params != nil && len(metadata.Params) > 0 {
-		params := make([]*Pair, 0, len(metadata.Params))
-		for name, value := range metadata.Params {
-			if _, ok := signingKeyMap[name]; ok {
-				params = append(params, &Pair{
-					First: name,
-					Last:  value,
-				})
-			}
-		}
-		sortPairs(params)
-		for index, param := range params {
-			if index == 0 {
-				wx.MustWriteString("?", param.First)
-			} else {
-				wx.MustWriteString("&", param.First)
-			}
-			if param.Last != "" {
-				wx.MustWriteString("=", param.Last)
-			}
-		}
-	}
-
-	signature := base64.StdEncoding.EncodeToString(signer.Sum(nil))
-	return fmt.Sprintf("OSS %s:%s", keyId, signature)
-}
