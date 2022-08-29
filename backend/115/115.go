@@ -177,13 +177,13 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
-	info, err := f.readMetaDataForPath(context.Background(), "/")
+	info, err := f.readMetaDataForPath(ctx, f.remotePath("/"))
 	if err == nil && !info.IsDir() {
 		f.root = path.Dir(f.root)
 		return f, fs.ErrorIsFile
 	}
 
-	uploadToken, err := f.getUploadToken(context.Background())
+	uploadToken, err := f.getUploadToken(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -382,6 +382,11 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	}
 
 	srcFs := src.(*Fs)
+	cid, err := f.getDirID(ctx, srcFs.remotePath(srcRemote))
+	if err != nil {
+		return err
+	}
+
 	srcParent, srcName := path.Split(srcFs.remotePath(srcRemote))
 	dstParent, dstName := path.Split(f.remotePath(dstRemote))
 	if srcParent == dstParent {
@@ -389,58 +394,40 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 			return fs.ErrorDirExists
 		}
 
-		cid, err := f.getDirID(ctx, srcFs.remotePath(srcRemote))
-		if err != nil {
-			return err
-		}
-
 		err = f.renameFile(ctx, cid, dstName)
 		if err != nil {
 			return err
 		}
 	} else {
-		needRename := false
-		if srcName != dstName {
-			needRename = true
-		}
-
-		srcCid, err := f.getDirID(ctx, srcFs.remotePath(srcRemote))
-		if err != nil {
-			return err
-		}
-		dstCid, err := f.getDirID(ctx, dstParent)
+		pid, err := f.getDirID(ctx, dstParent)
 		if errors.Is(err, fs.ErrorDirNotFound) {
-			p, _ := path.Split(path.Clean(dstRemote))
-			err = f.Mkdir(ctx, p)
+			newDir, _ := path.Split(path.Clean(dstRemote))
+			err = f.Mkdir(ctx, newDir)
 			if err != nil {
 				return err
 			}
-			dstCid, err = f.getDirID(ctx, dstParent)
+			pid, err = f.getDirID(ctx, dstParent)
 		}
 		if err != nil {
 			return err
 		}
 
-		err = f.moveFile(ctx, srcCid, dstCid)
+		err = f.moveFile(ctx, cid, pid)
 		if err != nil {
 			return err
 		}
-		if needRename {
-			err = f.renameFile(ctx, srcCid, dstName)
+		if srcName != dstName {
+			err = f.renameFile(ctx, cid, dstName)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	f.flushDir(srcParent)
-	f.flushDir(dstParent)
-	f.flushDir(srcFs.remotePath(srcRemote))
-	f.flushDir(f.remotePath(dstName))
-	srcFs.flushDir(srcParent)
-	srcFs.flushDir(dstParent)
-	srcFs.flushDir(srcFs.remotePath(srcRemote))
-	srcFs.flushDir(f.remotePath(dstName))
+	for _, dir := range []string{srcParent, dstParent, srcFs.remotePath(srcRemote), f.remotePath(dstRemote)} {
+		f.flushDir(dir)
+		srcFs.flushDir(dir)
+	}
 	return nil
 }
 
@@ -468,7 +455,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 //
 // Return an error if it doesn't exist
 func (f *Fs) Purge(ctx context.Context, dir string) error {
-	info, err := f.readMetaDataForPath(ctx, dir)
+	info, err := f.readMetaDataForPath(ctx, f.remotePath(dir))
 	if err != nil {
 		fs.Errorf(f, "purge fail, err: %v, dir: %v", err, f.remotePath(dir))
 		if errors.Is(err, fs.ErrorObjectNotFound) {
@@ -521,17 +508,16 @@ func (f *Fs) itemToDirEntry(ctx context.Context, remote string, object *api.File
 		remote = remote[1:]
 	}
 	if object.IsDir() {
-		t := object.GetUpdateTime()
-		// d := fs.NewDir(remote, t)
-		d := fs.NewDir(f.opt.Enc.ToStandardPath(remote), t)
+		d := fs.NewDir(f.opt.Enc.ToStandardPath(remote), object.GetUpdateTime())
 		return d, nil
-	} else {
-		o, err := f.newObjectWithInfo(ctx, remote, object)
-		if err != nil {
-			return nil, err
-		}
-		return o, nil
 	}
+
+	o, err := f.newObjectWithInfo(ctx, remote, object)
+	if err != nil {
+		return nil, err
+	}
+
+	return o, nil
 }
 
 func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.FileInfo) (fs.Object, error) {
@@ -551,8 +537,7 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 	return o, nil
 }
 
-func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
-	remotePath := f.remotePath(fullpath)
+func (f *Fs) readMetaDataForPath(ctx context.Context, remotePath string) (*api.FileInfo, error) {
 	if remotePath == "/" {
 		return &api.FileInfo{CategoryID: "0"}, nil
 	}
@@ -1068,7 +1053,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Remove this object
 func (o *Object) Remove(ctx context.Context) error {
-	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
+	info, err := o.fs.readMetaDataForPath(ctx, o.fs.remotePath(o.Remote()))
 	if err != nil {
 		fs.Errorf(o.fs, "remove object fail, err: %v, remote: %v", err, o.remote)
 		return err
@@ -1189,7 +1174,7 @@ func (o *Object) readMetaData(ctx context.Context) error {
 		return nil
 	}
 
-	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
+	info, err := o.fs.readMetaDataForPath(ctx, o.fs.remotePath(o.Remote()))
 	if err != nil {
 		return err
 	}
