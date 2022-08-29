@@ -34,7 +34,7 @@ import (
 const (
 	userAgent = "Mozilla/5.0 115Browser/23.9.3"
 
-	minSleep      = 150 * time.Millisecond
+	minSleep      = 200 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
@@ -177,6 +177,12 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
+	info, err := f.readMetaDataForPath(context.Background(), "/")
+	if err == nil && !info.IsDir() {
+		f.root = path.Dir(f.root)
+		return f, fs.ErrorIsFile
+	}
+
 	uploadToken, err := f.getUploadToken(context.Background())
 	if err != nil {
 		panic(err)
@@ -227,6 +233,15 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	return f.newObjectWithInfo(ctx, remote, nil)
 }
 
+func (f *Fs) createObject(remote string, modTime time.Time, size int64) *Object {
+	return &Object{
+		fs:      f,
+		remote:  remote,
+		size:    size,
+		modTime: modTime,
+	}
+}
+
 // List the objects and directories in dir into entries
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	infos, err := f.readDir(ctx, f.remotePath(dir))
@@ -261,56 +276,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return nil, fs.ErrorCantUploadEmptyFiles
 	}
 
-	if true {
-		parent, _ := path.Split(src.Remote())
-		err := f.Mkdir(ctx, parent)
-		if err != nil {
-			fs.Logf(f, "put mkdir fail, err: %v, parent: %v", err, parent)
-			return nil, err
-		}
-	}
+	o := f.createObject(src.Remote(), src.ModTime(ctx), src.Size())
+	return o, o.Update(ctx, in, src, options...)
 
-	parent, name := path.Split(f.remotePath(src.Remote()))
-	cid, err := f.getDirID(ctx, parent)
-	if err != nil {
-		fs.Logf(f, "put get dir id fail, parent: %v", parent)
-		return nil, err
-	}
-
-	var buf bytes.Buffer
-	tee := io.TeeReader(in, &buf)
-	info, dr, err := f.createUploadTicket(ctx, cid, name, tee)
-	if err != nil {
-		return nil, err
-	}
-	fs.Logf(f, "put, parent: %v, name: %v, info: %+v, dr: %+v", parent, name, info, dr)
-
-	bucket, err := f.ossClient.Bucket(info.Bucket)
-	if err != nil {
-		fs.Logf(f, "f.oss.Bucket fail, err: %v", err)
-		return nil, err
-	}
-
-	uploadOptions := []oss.Option{
-		oss.ContentLength(dr.Size),
-		oss.ContentLanguage(fs.MimeTypeFromName(name)),
-		oss.ContentMD5(dr.MD5),
-		oss.Callback(base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))),
-		oss.CallbackVar(base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))),
-	}
-	err = bucket.PutObject(info.Object, &buf, uploadOptions...)
-	if err != nil {
-		fs.Logf(f, "bucket.PutObject fail, err: %v", err)
-	}
-
-	f.flushDir(parent)
-	o, err := f.NewObject(ctx, src.Remote())
-	fs.Logf(f, "NewObject, remote: %v, parent: %v, err: %v", src.Remote(), parent, err)
-	if err != nil {
-		return nil, err
-	}
-
-	return o, nil
 }
 
 // Mkdir creates the container if it doesn't exist
@@ -389,8 +357,16 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 }
 
 // DirMove moves src, srcRemote to this remote at dstRemote
+// using server-side move operations.
+//
+// Will only be called if src.Fs().Name() == f.Name()
+//
+// If it isn't possible then return fs.ErrorCantDirMove
+//
+// If destination exists then return fs.ErrorDirExists
 func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
 	if src.Name() != f.Name() {
+		fs.Logf(f, "src.Fs.Name: %v, Name: %v", src.Name(), f.Name())
 		return fs.ErrorCantDirMove
 	}
 
@@ -398,7 +374,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	dstParent, dstName := path.Split(f.remotePath(dstRemote))
 	if srcParent == dstParent {
 		if srcName == dstName {
-			return nil
+			return fs.ErrorDirExists
 		}
 
 		cid, err := f.getDirID(ctx, f.remotePath(srcRemote))
@@ -435,13 +411,30 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	return nil
 }
 
-// Rmdir deletes the container
+// Rmdir removes the directory (container, bucket) if empty
+//
+// Return an error if it doesn't exist or isn't empty
 func (f *Fs) Rmdir(ctx context.Context, dir string) error {
+	files, err := f.readDir(ctx, f.remotePath(dir))
+	if err != nil {
+		return err
+	}
+
+	if len(files) > 0 {
+		fs.Logf(f, "rmdir, is not empty, dir: %v", dir)
+		return fs.ErrorDirectoryNotEmpty
+	}
+
 	fs.Logf(f, "rmdir, dir: %v", dir)
 	return f.Purge(ctx, dir)
 }
 
 // Purge all files in the directory specified
+//
+// Implement this if you have a way of deleting all the files
+// quicker than just running Remove() on the result of List()
+//
+// Return an error if it doesn't exist
 func (f *Fs) Purge(ctx context.Context, dir string) error {
 	info, err := f.readMetaDataForPath(ctx, dir)
 	if err != nil {
@@ -528,11 +521,13 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 
 func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
 	remotePath := f.remotePath(fullpath)
+	fs.Logf(f, "readMetaDataForPath, %v", remotePath)
 	if remotePath == "/" {
 		return &api.FileInfo{CategoryID: "0"}, nil
 	}
 
 	remoteDir, filename := path.Split(remotePath)
+	fs.Logf(f, "readMetaDataForPath, parent: %v, name: %v", remoteDir, filename)
 	infos, err := f.readDir(ctx, remoteDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrorDirNotFound) {
@@ -700,7 +695,10 @@ func (f *Fs) deleteFile(ctx context.Context, fid int64, pid int64) error {
 		return err
 	}
 	if !info.State {
-		fs.Logf(f, "delete file fail, not state, err: %v", info.Error)
+		if errno, ok := info.Errno.(int64); ok && errno == 990009 {
+			time.Sleep(time.Second)
+		}
+		fs.Logf(f, "delete file fail, not state, err: %v, errno: %v", info.Error, info.Errno)
 		return nil
 	}
 
@@ -1045,7 +1043,7 @@ func (o *Object) Remove(ctx context.Context) error {
 		return fs.ErrorIsDir
 	}
 
-	err = o.fs.deleteFile(ctx, info.GetFileID(), info.GetParentID())
+	err = o.fs.deleteFile(ctx, info.GetFileID(), info.GetCategoryID())
 	if err != nil {
 		return err
 	}
@@ -1069,7 +1067,69 @@ func (o *Object) Storable() bool {
 
 // Update in to the object with the modTime given of the given size
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
-	return fs.ErrorNotImplemented
+	f := o.fs
+	obj, err := f.NewObject(ctx, src.Remote())
+	if err == nil {
+		// FIXME: remove duplicate file
+		fs.Logf(f, "file exist, %+v", obj)
+		err := obj.Remove(ctx)
+		if err != nil {
+			fs.Logf(f, "remove file fail, %+v", obj)
+			return err
+		}
+	}
+
+	if true {
+		parent, _ := path.Split(src.Remote())
+		err := f.Mkdir(ctx, parent)
+		if err != nil {
+			fs.Logf(f, "put mkdir fail, err: %v, parent: %v", err, parent)
+			return err
+		}
+	}
+
+	parent, name := path.Split(f.remotePath(src.Remote()))
+	cid, err := f.getDirID(ctx, parent)
+	if err != nil {
+		fs.Logf(f, "put get dir id fail, parent: %v", parent)
+		return err
+	}
+
+	var buf bytes.Buffer
+	tee := io.TeeReader(in, &buf)
+	info, dr, err := f.createUploadTicket(ctx, cid, name, tee)
+	if err != nil {
+		return err
+	}
+	fs.Logf(f, "put, parent: %v, name: %v, info: %+v, dr: %+v", parent, name, info, dr)
+
+	bucket, err := f.ossClient.Bucket(info.Bucket)
+	if err != nil {
+		fs.Logf(f, "f.oss.Bucket fail, err: %v", err)
+		return err
+	}
+
+	uploadOptions := []oss.Option{
+		oss.ContentLength(dr.Size),
+		oss.ContentLanguage(fs.MimeTypeFromName(name)),
+		oss.ContentMD5(dr.MD5),
+		oss.Callback(base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))),
+		oss.CallbackVar(base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))),
+	}
+	err = bucket.PutObject(info.Object, &buf, uploadOptions...)
+	if err != nil {
+		fs.Logf(f, "bucket.PutObject fail, err: %v", err)
+	}
+
+	f.flushDir(parent)
+	o.hasMetaData = false
+	err = o.readMetaData(ctx)
+	if err != nil {
+		fs.Logf(f, "o.readMeta data fail, err: %v", err)
+		return err
+	}
+
+	return nil
 }
 
 // setMetaData sets the metadata from info

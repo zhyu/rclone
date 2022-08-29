@@ -6,8 +6,9 @@ import (
 )
 
 type BaseResponse struct {
-	Error string `json:"error,omitempty"`
-	State bool   `json:"state"`
+	Errno interface{} `json:"errno"`
+	Error string      `json:"error,omitempty"`
+	State bool        `json:"state"`
 }
 
 type UploadInfoResponse struct {
@@ -44,11 +45,11 @@ type UploadInitResponse struct {
 }
 
 type UploadOssTokenResponse struct {
-    StatusCode      string `json:"StatusCode"`
-    AccessKeyId     string `json:"AccessKeyId"`
-    AccessKeySecret string `json:"AccessKeySecret"`
-    SecurityToken   string `json:"SecurityToken"`
-    Expiration      string `json:"Expiration"`                                                                                               
+	StatusCode      string `json:"StatusCode"`
+	AccessKeyId     string `json:"AccessKeyId"`
+	AccessKeySecret string `json:"AccessKeySecret"`
+	SecurityToken   string `json:"SecurityToken"`
+	Expiration      string `json:"Expiration"`
 }
 
 type GetFilesResponse struct {
