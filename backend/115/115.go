@@ -30,12 +30,14 @@ import (
 )
 
 const (
+	domain      = "www.115.com"
 	userAgent   = "Mozilla/5.0 115Browser/23.9.3"
 	ossEndpoint = "https://oss-cn-shenzhen.aliyuncs.com"
 
-	minSleep      = 150 * time.Millisecond
-	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
-	decayConstant = 2
+	uploadSizeLimit = 5 * 1024 * 1024 * 1024
+	minSleep        = 150 * time.Millisecond
+	maxSleep        = 2 * time.Second // may needs to be increased, testing needed
+	decayConstant   = 2
 )
 
 // Register with Fs
@@ -155,19 +157,19 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 	f.srv.SetCookie(&http.Cookie{
 		Name:     "UID",
 		Value:    opt.UID,
-		Domain:   "www.115.com",
+		Domain:   domain,
 		Path:     "/",
 		HttpOnly: true,
 	}, &http.Cookie{
 		Name:     "CID",
 		Value:    opt.CID,
-		Domain:   "www.115.com",
+		Domain:   domain,
 		Path:     "/",
 		HttpOnly: true,
 	}, &http.Cookie{
 		Name:     "SEID",
 		Value:    opt.SEID,
-		Domain:   "www.115.com",
+		Domain:   domain,
 		Path:     "/",
 		HttpOnly: true,
 	})
@@ -823,6 +825,9 @@ func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in 
 	err := crypto.Digest(in, dr)
 	if err != nil {
 		return nil, nil, err
+	}
+	if dr.Size > uploadSizeLimit {
+		return nil, nil, fmt.Errorf("upload reach the limit")
 	}
 
 	uploadInfo, err := f.getUploadInfo(ctx)
