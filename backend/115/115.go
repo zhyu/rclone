@@ -366,18 +366,18 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // If destination exists then return fs.ErrorDirExists
 func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string) error {
 	if src.Name() != f.Name() {
-		fs.Logf(f, "src.Fs.Name: %v, Name: %v", src.Name(), f.Name())
 		return fs.ErrorCantDirMove
 	}
 
-	srcParent, srcName := path.Split(f.remotePath(srcRemote))
+	srcFs := src.(*Fs)
+	srcParent, srcName := path.Split(srcFs.remotePath(srcRemote))
 	dstParent, dstName := path.Split(f.remotePath(dstRemote))
 	if srcParent == dstParent {
 		if srcName == dstName {
 			return fs.ErrorDirExists
 		}
 
-		cid, err := f.getDirID(ctx, f.remotePath(srcRemote))
+		cid, err := f.getDirID(ctx, srcFs.remotePath(srcRemote))
 		if err != nil {
 			return err
 		}
@@ -387,15 +387,24 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 			return err
 		}
 	} else {
+		needRename := false
 		if srcName != dstName {
-			return fs.ErrorCantDirMove
+			needRename = true
 		}
 
-		srcCid, err := f.getDirID(ctx, f.remotePath(srcRemote))
+		srcCid, err := f.getDirID(ctx, srcFs.remotePath(srcRemote))
 		if err != nil {
 			return err
 		}
 		dstCid, err := f.getDirID(ctx, dstParent)
+		if errors.Is(err, fs.ErrorDirNotFound) {
+			p, _ := path.Split(path.Clean(dstRemote))
+			err = f.Mkdir(ctx, p)
+			if err != nil {
+				return err
+			}
+			dstCid, err = f.getDirID(ctx, dstParent)
+		}
 		if err != nil {
 			return err
 		}
@@ -404,10 +413,22 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		if err != nil {
 			return err
 		}
+		if needRename {
+			err = f.renameFile(ctx, srcCid, dstName)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	f.flushDir(srcParent)
 	f.flushDir(dstParent)
+	f.flushDir(srcFs.remotePath(srcRemote))
+	f.flushDir(f.remotePath(dstName))
+	srcFs.flushDir(srcParent)
+	srcFs.flushDir(dstParent)
+	srcFs.flushDir(srcFs.remotePath(srcRemote))
+	srcFs.flushDir(f.remotePath(dstName))
 	return nil
 }
 
@@ -425,7 +446,6 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 		return fs.ErrorDirectoryNotEmpty
 	}
 
-	fs.Logf(f, "rmdir, dir: %v", dir)
 	return f.Purge(ctx, dir)
 }
 
@@ -521,13 +541,11 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 
 func (f *Fs) readMetaDataForPath(ctx context.Context, fullpath string) (*api.FileInfo, error) {
 	remotePath := f.remotePath(fullpath)
-	fs.Logf(f, "readMetaDataForPath, %v", remotePath)
 	if remotePath == "/" {
 		return &api.FileInfo{CategoryID: "0"}, nil
 	}
 
 	remoteDir, filename := path.Split(remotePath)
-	fs.Logf(f, "readMetaDataForPath, parent: %v, name: %v", remoteDir, filename)
 	infos, err := f.readDir(ctx, remoteDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrorDirNotFound) {
@@ -588,7 +606,6 @@ func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
 	}
 	opts.MultipartParams.Set("pid", strconv.FormatInt(pid, 10))
 	opts.MultipartParams.Set("cname", f.opt.Enc.FromStandardName(name))
-	fs.Logf(f, "cname: %v, cname: %v", name, f.opt.Enc.FromStandardName(name))
 
 	var err error
 	var info api.MkdirResponse
@@ -619,7 +636,6 @@ func (f *Fs) getDirID(ctx context.Context, remoteDir string) (int64, error) {
 		Parameters: url.Values{},
 	}
 	opts.Parameters.Set("path", f.opt.Enc.FromStandardPath(remoteDir))
-	fs.Logf(f, "getDirID cname: %v, cname: %v", remoteDir, f.opt.Enc.FromStandardPath(remoteDir))
 
 	var err error
 	var info api.GetDirIDResponse
@@ -961,7 +977,6 @@ func (f *Fs) remotePath(name string) string {
 
 func (f *Fs) flushDir(dir string) {
 	cacheKey := fmt.Sprintf("files:%v", path.Clean(dir))
-	fs.Logf(f, "flushDir, cache key: %v", cacheKey)
 	f.cache.Delete(cacheKey)
 }
 
@@ -1006,7 +1021,6 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	// fs.Logf(o.fs, "open file, remote: %v, options: %v", o.remote, options)
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
@@ -1021,7 +1035,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		// fs.Logf(o.fs, "open file resp, remote: %v, status: %v, options: %v", o.remote, resp.StatusCode, options)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
