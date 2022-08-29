@@ -3,9 +3,7 @@ package _115
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,9 +30,10 @@ import (
 )
 
 const (
-	userAgent = "Mozilla/5.0 115Browser/23.9.3"
+	userAgent   = "Mozilla/5.0 115Browser/23.9.3"
+	ossEndpoint = "https://oss-cn-shenzhen.aliyuncs.com"
 
-	minSleep      = 200 * time.Millisecond
+	minSleep      = 150 * time.Millisecond
 	maxSleep      = 2 * time.Second // may needs to be increased, testing needed
 	decayConstant = 2
 )
@@ -86,15 +85,14 @@ type Options struct {
 
 // Fs represents a remote 115 drive
 type Fs struct {
-	name      string
-	root      string
-	opt       Options
-	ci        *fs.ConfigInfo
-	features  *fs.Features
-	srv       *rest.Client
-	pacer     *fs.Pacer
-	cache     *cache.Cache
-	ossClient *oss.Client
+	name     string
+	root     string
+	opt      Options
+	ci       *fs.ConfigInfo
+	features *fs.Features
+	srv      *rest.Client
+	pacer    *fs.Pacer
+	cache    *cache.Cache
 }
 
 // Object describes a 115 object
@@ -181,17 +179,6 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 	if err == nil && !info.IsDir() {
 		f.root = path.Dir(f.root)
 		return f, fs.ErrorIsFile
-	}
-
-	uploadToken, err := f.getUploadToken(ctx)
-	if err != nil {
-		panic(err)
-	}
-
-	// init oss client
-	f.ossClient, err = oss.New("https://oss-cn-shenzhen.aliyuncs.com", uploadToken.AccessKeyId, uploadToken.AccessKeySecret, oss.SecurityToken(uploadToken.SecurityToken), oss.EnableMD5(true))
-	if err != nil {
-		panic(err)
 	}
 
 	return f, nil
@@ -615,8 +602,7 @@ func (f *Fs) makeDir(ctx context.Context, pid int64, name string) error {
 		return err
 	}
 	if !info.State {
-		if errno, ok := info.Errno.(int64); ok && errno == 20004 {
-			fs.Logf(f, "make dir exists, pid: %v, name: %v, err: %v", pid, name, info.Error)
+		if info.GetErrno() == 20004 {
 			return fs.ErrorDirExists
 		}
 		fs.Logf(f, "make dir fail, pid: %v, name: %v, err: %v, errno: %v", pid, name, info.Error, info.Errno)
@@ -855,7 +841,7 @@ func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in 
 	opts.Parameters.Set("appid", uploadInfo.AppID.String())
 	opts.Parameters.Set("appversion", uploadInfo.AppVersion.String())
 	opts.Parameters.Set("isp", strconv.FormatInt(uploadInfo.IspType, 10))
-	opts.Parameters.Set("sig", f.uploadCalculateSignature(uploadInfo.UserID, uploadInfo.UserKey, targetID, dr.QuickId))
+	opts.Parameters.Set("sig", crypto.UploadSignature(uploadInfo.UserID, uploadInfo.UserKey, targetID, dr.QuickId))
 	opts.Parameters.Set("format", "json")
 	opts.Parameters.Set("t", strconv.FormatInt(time.Now().Unix(), 10))
 
@@ -878,23 +864,7 @@ func (f *Fs) createUploadTicket(ctx context.Context, cid int64, name string, in 
 		return nil, nil, err
 	}
 
-	fs.Logf(f, "upload init response: %+v", info)
 	return &info, dr, nil
-}
-
-func (f *Fs) uploadCalculateSignature(userID int64, userKey string, targetID string, fileID string) string {
-	digester := sha1.New()
-	digester.Write([]byte(strconv.FormatInt(userID, 10)))
-	digester.Write([]byte(fileID))
-	digester.Write([]byte(fileID))
-	digester.Write([]byte(targetID))
-	digester.Write([]byte("0"))
-	h := hex.EncodeToString(digester.Sum(nil))
-	digester.Reset()
-	digester.Write([]byte(userKey))
-	digester.Write([]byte(h))
-	digester.Write([]byte("000000"))
-	return strings.ToUpper(hex.EncodeToString(digester.Sum(nil)))
 }
 
 func (f *Fs) getUploadInfo(ctx context.Context) (*api.UploadInfoResponse, error) {
@@ -938,8 +908,6 @@ func (f *Fs) getUploadToken(ctx context.Context) (*api.UploadOssTokenResponse, e
 		return nil, err
 	}
 
-	fs.Logf(f, "get upload token response: %+v", info)
-
 	return &info, nil
 }
 
@@ -961,6 +929,15 @@ func (f *Fs) indexInfo(ctx context.Context) (*api.IndexInfoResponse, error) {
 	}
 
 	return &info, nil
+}
+
+func (f *Fs) getOssClient(ctx context.Context) (*oss.Client, error) {
+	uploadToken, err := f.getUploadToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return oss.New(ossEndpoint, uploadToken.AccessKeyID, uploadToken.AccessKeySecret, oss.SecurityToken(uploadToken.SecurityToken), oss.EnableMD5(true), oss.EnableCRC(false))
 }
 
 func (f *Fs) createObject(remote string, modTime time.Time, size int64) *Object {
@@ -1094,8 +1071,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	f := o.fs
 	obj, err := f.NewObject(ctx, src.Remote())
 	if err == nil {
-		// FIXME: remove duplicate file
-		fs.Logf(f, "file exist, %+v", obj)
+		fs.Logf(f, "file exist, remote it, %+v", obj)
 		err := obj.Remove(ctx)
 		if err != nil {
 			fs.Logf(f, "remove file fail, %+v", obj)
@@ -1107,53 +1083,50 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		parent, _ := path.Split(src.Remote())
 		err := f.Mkdir(ctx, parent)
 		if err != nil {
-			fs.Logf(f, "put mkdir fail, err: %v, parent: %v", err, parent)
 			return err
 		}
 	}
 
-	parent, name := path.Split(f.remotePath(src.Remote()))
-	cid, err := f.getDirID(ctx, parent)
+	ossClient, err := f.getOssClient(ctx)
 	if err != nil {
-		fs.Logf(f, "put get dir id fail, parent: %v", parent)
+		fs.Logf(f, "get oss client fail, err: %v", err)
+		return err
+	}
+
+	dir, name := path.Split(f.remotePath(src.Remote()))
+	cid, err := f.getDirID(ctx, dir)
+	if err != nil {
 		return err
 	}
 
 	var buf bytes.Buffer
 	tee := io.TeeReader(in, &buf)
-	info, dr, err := f.createUploadTicket(ctx, cid, name, tee)
+	info, digest, err := f.createUploadTicket(ctx, cid, name, tee)
 	if err != nil {
+		fs.Logf(f, "create upload ticket fail, err: %v", err)
 		return err
 	}
-	fs.Logf(f, "put, parent: %v, name: %v, info: %+v, dr: %+v", parent, name, info, dr)
 
-	bucket, err := f.ossClient.Bucket(info.Bucket)
+	bucket, err := ossClient.Bucket(info.Bucket)
 	if err != nil {
 		fs.Logf(f, "f.oss.Bucket fail, err: %v", err)
 		return err
 	}
 
-	uploadOptions := []oss.Option{
-		oss.ContentLength(dr.Size),
-		oss.ContentLanguage(fs.MimeTypeFromName(name)),
-		oss.ContentMD5(dr.MD5),
+	err = bucket.PutObject(info.Object, &buf,
+		oss.ContentLength(digest.Size),
+		oss.ContentType(fs.MimeTypeFromName(name)),
+		oss.ContentMD5(digest.MD5),
 		oss.Callback(base64.StdEncoding.EncodeToString([]byte(info.Callback.Callback))),
 		oss.CallbackVar(base64.StdEncoding.EncodeToString([]byte(info.Callback.CallbackVar))),
-	}
-	err = bucket.PutObject(info.Object, &buf, uploadOptions...)
+	)
 	if err != nil {
 		fs.Logf(f, "bucket.PutObject fail, err: %v", err)
 	}
 
-	f.flushDir(parent)
+	f.flushDir(dir)
 	o.hasMetaData = false
-	err = o.readMetaData(ctx)
-	if err != nil {
-		fs.Logf(f, "o.readMeta data fail, err: %v", err)
-		return err
-	}
-
-	return nil
+	return o.readMetaData(ctx)
 }
 
 // setMetaData sets the metadata from info

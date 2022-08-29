@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -39,14 +40,14 @@ type UploadInitResponse struct {
 	} `json:"callback"`
 
 	// Useless fields
-	FileId   int    `json:"fileid"`
+	FileID   int    `json:"fileid"`
 	FileInfo string `json:"fileinfo"`
 	Target   string `json:"target"`
 }
 
 type UploadOssTokenResponse struct {
 	StatusCode      string `json:"StatusCode"`
-	AccessKeyId     string `json:"AccessKeyId"`
+	AccessKeyID     string `json:"AccessKeyId"`
 	AccessKeySecret string `json:"AccessKeySecret"`
 	SecurityToken   string `json:"SecurityToken"`
 	Expiration      string `json:"Expiration"`
@@ -104,7 +105,7 @@ type GetURLResponse struct {
 }
 
 type MkdirResponse struct {
-	Errno interface{} `json:"errno,omitempty"`
+	Errno interface{} `json:"errno"`
 	Error string      `json:"error,omitempty"`
 	State bool        `json:"state"`
 }
@@ -177,4 +178,19 @@ func (f *FileInfo) GetCategoryID() int64 {
 func (f *FileInfo) GetParentID() int64 {
 	pid, _ := f.ParentID.Int64()
 	return pid
+}
+
+func (r *MkdirResponse) GetErrno() int64 {
+	if val, ok := r.Errno.(string); ok {
+		errno, _ := strconv.ParseInt(val, 10, 64)
+		return errno
+	}
+	if val, ok := r.Errno.(int64); ok {
+		return val
+	}
+	if val, ok := r.Errno.(float64); ok {
+		return int64(val)
+	}
+
+	return 0
 }

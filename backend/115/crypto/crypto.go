@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -138,6 +139,21 @@ func Digest(r io.Reader, result *DigestResult) error {
 	}
 	result.MD5 = base64.StdEncoding.EncodeToString(hm.Sum(nil))
 	return nil
+}
+
+func UploadSignature(userID int64, userKey string, targetID string, fileID string) string {
+	digester := sha1.New()
+	digester.Write([]byte(strconv.FormatInt(userID, 10)))
+	digester.Write([]byte(fileID))
+	digester.Write([]byte(fileID))
+	digester.Write([]byte(targetID))
+	digester.Write([]byte("0"))
+	h := hex.EncodeToString(digester.Sum(nil))
+	digester.Reset()
+	digester.Write([]byte(userKey))
+	digester.Write([]byte(h))
+	digester.Write([]byte("000000"))
+	return strings.ToUpper(hex.EncodeToString(digester.Sum(nil)))
 }
 
 func xorDeriveKey(seed []byte, size int) []byte {
