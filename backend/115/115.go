@@ -144,7 +144,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		if err != nil {
 			return fmt.Errorf("error reading error out of body: %w", err)
 		}
-		if resp.StatusCode == 403 {
+		if resp.StatusCode == http.StatusForbidden {
 			time.Sleep(time.Second)
 		}
 		return fmt.Errorf("HTTP error %v (%v) returned body: %q", resp.StatusCode, resp.Status, body)
