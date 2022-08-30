@@ -1071,6 +1071,11 @@ func (o *Object) Storable() bool {
 	return true
 }
 
+// ID returns the ID of the Object if known, or "" if not
+func (o *Object) ID() string {
+	return strconv.FormatInt(o.fileID, 10)
+}
+
 // Update in to the object with the modTime given of the given size
 //
 // When called from outside an Fs by rclone, src.Size() will always be >= 0.
@@ -1179,5 +1184,6 @@ var (
 	_ fs.Abouter    = (*Fs)(nil)
 	_ fs.Object     = (*Object)(nil)
 	_ fs.ObjectInfo = (*Object)(nil)
+	_ fs.IDer       = (*Object)(nil)
 	// _ fs.MimeTyper = (*Object)(nil)
 )
