@@ -36,7 +36,7 @@ const (
 
 	uploadSizeLimit = 5 * 1024 * 1024 * 1024
 	minSleep        = 150 * time.Millisecond
-	maxSleep        = 2 * time.Second // may needs to be increased, testing needed
+	maxSleep        = 2 * time.Second
 	decayConstant   = 2
 )
 
@@ -66,7 +66,6 @@ func init() {
 				encoder.EncodeLeftSpace |
 				encoder.EncodeRightSpace |
 				encoder.EncodeBackSlash |
-				encoder.EncodeSlash |
 				encoder.EncodeColon |
 				encoder.EncodeAsterisk |
 				encoder.EncodeQuestion |
@@ -141,7 +140,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		ci:    ci,
 		srv:   rest.NewClient(&http.Client{}),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		cache: cache.New(time.Minute*2, time.Minute*4),
+		cache: cache.New(time.Minute, time.Minute*2),
 	}
 	f.srv.SetErrorHandler(func(resp *http.Response) error {
 		body, err := rest.ReadBody(resp)
