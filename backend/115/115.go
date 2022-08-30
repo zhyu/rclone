@@ -941,7 +941,12 @@ func (f *Fs) getOssClient(ctx context.Context) (*oss.Client, error) {
 		return nil, err
 	}
 
-	return oss.New(ossEndpoint, uploadToken.AccessKeyID, uploadToken.AccessKeySecret, oss.SecurityToken(uploadToken.SecurityToken), oss.EnableMD5(true), oss.EnableCRC(false))
+	return oss.New(ossEndpoint,
+		uploadToken.AccessKeyID,
+		uploadToken.AccessKeySecret,
+		oss.SecurityToken(uploadToken.SecurityToken),
+		oss.EnableMD5(true),
+		oss.EnableCRC(false))
 }
 
 func (f *Fs) createObject(remote string, modTime time.Time, size int64) *Object {
