@@ -268,6 +268,10 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	if src.Size() == 0 {
 		return nil, fs.ErrorCantUploadEmptyFiles
 	}
+	// TODO: enable file upload
+	if true {
+		return nil, fs.ErrorNotImplemented
+	}
 
 	o := f.createObject(src.Remote(), src.ModTime(ctx), src.Size())
 	return o, o.Update(ctx, in, src, options...)
@@ -1082,6 +1086,11 @@ func (o *Object) ID() string {
 // But for unknown-sized objects (indicated by src.Size() == -1), Upload should either
 // return an error or update the object properly (rather than e.g. calling panic).
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	// TODO: enable file upload
+	if true {
+		return fs.ErrorNotImplemented
+	}
+
 	f := o.fs
 	obj, err := f.NewObject(ctx, src.Remote())
 	if err == nil {
