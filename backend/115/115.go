@@ -1013,6 +1013,7 @@ func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 
 // Open opens the file for read.  Call Close() on the returned io.ReadCloser
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+	fs.Logf(o.fs, "open %v, options: %v", o.remote, options)
 	targetURL, err := o.fs.getURL(ctx, o.remote, o.pickCode)
 	if err != nil {
 		return nil, err
