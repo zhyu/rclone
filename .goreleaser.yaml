@@ -34,7 +34,7 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: 'dev_{{ time "20060102" }}'
+  name_template: '{{ time "20060102" }}'
 changelog:
   sort: asc
   filters:
