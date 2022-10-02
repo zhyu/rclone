@@ -8,17 +8,17 @@ before:
     # - go generate ./...
 builds:
   - env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     ldflags:
       - -s -w
     goos:
       - linux
-      # - windows
-      # - darwin
+      - windows
+      - darwin
     goarch:
       - amd64
-        # - 386
-        # - arm64
+      - 386
+      - arm64
     ignore:
       - goos: windows
         goarch: arm

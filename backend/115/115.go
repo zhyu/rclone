@@ -31,7 +31,7 @@ import (
 
 const (
 	domain      = "www.115.com"
-	userAgent   = "Mozilla/5.0 115Browser/23.9.3 115Desktop/2.0.1.7"
+	userAgent   = "Mozilla/5.0 115Browser/23.9.3.2"
 	ossEndpoint = "https://oss-cn-shenzhen.aliyuncs.com"
 
 	uploadSizeLimit = 5 * 1024 * 1024 * 1024
@@ -784,8 +784,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 		MultipartParams: url.Values{},
 	}
 	opts.Parameters.Add("t", strconv.FormatInt(time.Now().Unix(), 10))
-	dataBytes, _ := crypto.Encode([]byte(data), []byte(key))
-	opts.MultipartParams.Set("data", string(dataBytes))
+	opts.MultipartParams.Set("data", crypto.Encode([]byte(data), key))
 	var err error
 	var info api.GetURLResponse
 	var resp *http.Response
@@ -802,7 +801,7 @@ func (f *Fs) getURL(ctx context.Context, remote string, pickCode string) (string
 	if err := json.Unmarshal(info.Data, &encodedData); err != nil {
 		return "", fmt.Errorf("api get download url, call json.Unmarshal fail, body: %s", string(info.Data))
 	}
-	decodedData, err := crypto.Decode([]byte(encodedData), []byte(key))
+	decodedData, err := crypto.Decode(encodedData, key)
 	if err != nil {
 		return "", fmt.Errorf("api get download url, call Decode fail, err: %w", err)
 	}
