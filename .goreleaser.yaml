@@ -13,12 +13,12 @@ builds:
       - -s -w
     goos:
       - linux
-      - windows
-      - darwin
+      # - windows
+      # - darwin
     goarch:
       - amd64
-      - 386
-      - arm64
+      # - 386
+      # - arm64
     ignore:
       - goos: windows
         goarch: arm
@@ -33,8 +33,41 @@ archives:
       amd64: x86_64
 checksum:
   name_template: 'checksums.txt'
+dockers:
+  - use: buildx
+    goarch: amd64
+    dockerfile: 'Dockerfile.new'
+    build_flag_templates:
+    - '--platform=linux/amd64'
+    image_templates:
+    - 'gaoyb7/rclone:v1_{{ time "20060102" }}-amd64'
+  - use: buildx
+    goarch: 386
+    dockerfile: 'Dockerfile.new'
+    build_flag_templates:
+    - '--platform=linux/386'
+    image_templates:
+    - 'gaoyb7/rclone:v1_{{ time "20060102" }}-i386'
+  - use: buildx
+    goarch: arm64
+    dockerfile: 'Dockerfile.new'
+    build_flag_templates:
+    - '--platform=linux/arm64/v8'
+    image_templates:
+    - 'gaoyb7/rclone:v1_{{ time "20060102" }}-arm64v8'
+docker_manifests:
+- name_template: 'gaoyb7/rclone:v1_{{ time "20060102" }}'
+  image_templates:
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-amd64'
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-i386'
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-arm64v8'
+- name_template: gaoyb7/rclone:latest
+  image_templates:
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-amd64'
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-i386'
+  - 'gaoyb7/rclone:v1_{{ time "20060102" }}-arm64v8'
 snapshot:
-  name_template: 'v1_{{ time "20060102" }}'
+  name_template: v1_{{ time "20060102" }}
 changelog:
   sort: asc
   filters:

@@ -1,0 +1,8 @@
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates fuse tzdata && \
+    echo "user_allow_other" >> /etc/fuse.conf
+
+COPY rclone /usr/bin/rclone
+
+ENTRYPOINT ["/usr/bin/rclone"]
