@@ -41,6 +41,7 @@ dockers:
     - 'gaoyb7/rclone:v1_{{ time "20060102" }}-amd64'
   - use: buildx
     goarch: 386
+    dockerfile: 'Dockerfile.new'
     build_flag_templates:
     - "--platform=linux/386"
     image_templates:
@@ -55,6 +56,7 @@ dockers:
   - use: buildx
     goarch: arm
     goarm: 7
+    dockerfile: 'Dockerfile.new'
     build_flag_templates:
     - "--platform=linux/arm/v7"
     image_templates:
