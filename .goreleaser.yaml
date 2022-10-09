@@ -11,6 +11,8 @@ builds:
       - CGO_ENABLED=0
     ldflags:
       - -s -w
+    tags:
+      - cmount
     goos:
       - linux
       - windows
