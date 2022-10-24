@@ -57,6 +57,7 @@ import (
 	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/rest"
 	"github.com/rclone/rclone/lib/version"
+	"golang.org/x/net/http/httpguts"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -64,7 +65,7 @@ import (
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "s3",
-		Description: "Amazon S3 Compliant Storage Providers including AWS, Alibaba, Ceph, China Mobile, Cloudflare, ArvanCloud, Digital Ocean, Dreamhost, Huawei OBS, IBM COS, IDrive e2, Lyve Cloud, Minio, Netease, RackCorp, Scaleway, SeaweedFS, StackPath, Storj, Tencent COS and Wasabi",
+		Description: "Amazon S3 Compliant Storage Providers including AWS, Alibaba, Ceph, China Mobile, Cloudflare, ArvanCloud, Digital Ocean, Dreamhost, Huawei OBS, IBM COS, IDrive e2, IONOS Cloud, Lyve Cloud, Minio, Netease, RackCorp, Scaleway, SeaweedFS, StackPath, Storj, Tencent COS, Qiniu and Wasabi",
 		NewFs:       NewFs,
 		CommandHelp: commandHelp,
 		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
@@ -117,6 +118,9 @@ func init() {
 				Value: "IDrive",
 				Help:  "IDrive e2",
 			}, {
+				Value: "IONOS",
+				Help:  "IONOS Cloud",
+			}, {
 				Value: "LyveCloud",
 				Help:  "Seagate Lyve Cloud",
 			}, {
@@ -146,6 +150,9 @@ func init() {
 			}, {
 				Value: "Wasabi",
 				Help:  "Wasabi Object Storage",
+			}, {
+				Value: "Qiniu",
+				Help:  "Qiniu Object Storage (Kodo)",
 			}, {
 				Value: "Other",
 				Help:  "Any other S3 compatible provider",
@@ -385,9 +392,51 @@ func init() {
 				Help:  "R2 buckets are automatically distributed across Cloudflare's data centers for low latency.",
 			}},
 		}, {
+			// References:
+			// https://developer.qiniu.com/kodo/4088/s3-access-domainname
+			Name:     "region",
+			Help:     "Region to connect to.",
+			Provider: "Qiniu",
+			Examples: []fs.OptionExample{{
+				Value: "cn-east-1",
+				Help:  "The default endpoint - a good choice if you are unsure.\nEast China Region 1.\nNeeds location constraint cn-east-1.",
+			}, {
+				Value: "cn-east-2",
+				Help:  "East China Region 2.\nNeeds location constraint cn-east-2.",
+			}, {
+				Value: "cn-north-1",
+				Help:  "North China Region 1.\nNeeds location constraint cn-north-1.",
+			}, {
+				Value: "cn-south-1",
+				Help:  "South China Region 1.\nNeeds location constraint cn-south-1.",
+			}, {
+				Value: "us-north-1",
+				Help:  "North America Region.\nNeeds location constraint us-north-1.",
+			}, {
+				Value: "ap-southeast-1",
+				Help:  "Southeast Asia Region 1.\nNeeds location constraint ap-southeast-1.",
+			}, {
+				Value: "ap-northeast-1",
+				Help:  "Northeast Asia Region 1.\nNeeds location constraint ap-northeast-1.",
+			}},
+		}, {
+			Name:     "region",
+			Help:     "Region where your bucket will be created and your data stored.\n",
+			Provider: "IONOS",
+			Examples: []fs.OptionExample{{
+				Value: "de",
+				Help:  "Frankfurt, Germany",
+			}, {
+				Value: "eu-central-2",
+				Help:  "Berlin, Germany",
+			}, {
+				Value: "eu-south-2",
+				Help:  "Logrono, Spain",
+			}},
+		}, {
 			Name:     "region",
 			Help:     "Region to connect to.\n\nLeave blank if you are using an S3 clone and you don't have a region.",
-			Provider: "!AWS,Alibaba,ChinaMobile,Cloudflare,ArvanCloud,RackCorp,Scaleway,Storj,TencentCOS,HuaweiOBS,IDrive",
+			Provider: "!AWS,Alibaba,ChinaMobile,Cloudflare,IONOS,ArvanCloud,Qiniu,RackCorp,Scaleway,Storj,TencentCOS,HuaweiOBS,IDrive",
 			Examples: []fs.OptionExample{{
 				Value: "",
 				Help:  "Use this if unsure.\nWill use v4 signatures and an empty region.",
@@ -699,6 +748,20 @@ func init() {
 				Help:  "Singapore Single Site Private Endpoint",
 			}},
 		}, {
+			Name:     "endpoint",
+			Help:     "Endpoint for IONOS S3 Object Storage.\n\nSpecify the endpoint from the same region.",
+			Provider: "IONOS",
+			Examples: []fs.OptionExample{{
+				Value: "s3-eu-central-1.ionoscloud.com",
+				Help:  "Frankfurt, Germany",
+			}, {
+				Value: "s3-eu-central-2.ionoscloud.com",
+				Help:  "Berlin, Germany",
+			}, {
+				Value: "s3-eu-south-2.ionoscloud.com",
+				Help:  "Logrono, Spain",
+			}},
+		}, {
 			// oss endpoints: https://help.aliyun.com/document_detail/31837.html
 			Name:     "endpoint",
 			Help:     "Endpoint for OSS API.",
@@ -999,9 +1062,36 @@ func init() {
 				Help:  "Auckland (New Zealand) Endpoint",
 			}},
 		}, {
+			// Qiniu endpoints: https://developer.qiniu.com/kodo/4088/s3-access-domainname
+			Name:     "endpoint",
+			Help:     "Endpoint for Qiniu Object Storage.",
+			Provider: "Qiniu",
+			Examples: []fs.OptionExample{{
+				Value: "s3-cn-east-1.qiniucs.com",
+				Help:  "East China Endpoint 1",
+			}, {
+				Value: "s3-cn-east-2.qiniucs.com",
+				Help:  "East China Endpoint 2",
+			}, {
+				Value: "s3-cn-north-1.qiniucs.com",
+				Help:  "North China Endpoint 1",
+			}, {
+				Value: "s3-cn-south-1.qiniucs.com",
+				Help:  "South China Endpoint 1",
+			}, {
+				Value: "s3-us-north-1.qiniucs.com",
+				Help:  "North America Endpoint 1",
+			}, {
+				Value: "s3-ap-southeast-1.qiniucs.com",
+				Help:  "Southeast Asia Endpoint 1",
+			}, {
+				Value: "s3-ap-northeast-1.qiniucs.com",
+				Help:  "Northeast Asia Endpoint 1",
+			}},
+		}, {
 			Name:     "endpoint",
 			Help:     "Endpoint for S3 API.\n\nRequired when using an S3 clone.",
-			Provider: "!AWS,IBMCOS,IDrive,TencentCOS,HuaweiOBS,Alibaba,ChinaMobile,ArvanCloud,Scaleway,StackPath,Storj,RackCorp",
+			Provider: "!AWS,IBMCOS,IDrive,IONOS,TencentCOS,HuaweiOBS,Alibaba,ChinaMobile,ArvanCloud,Scaleway,StackPath,Storj,RackCorp,Qiniu",
 			Examples: []fs.OptionExample{{
 				Value:    "objects-us-east-1.dream.io",
 				Help:     "Dream Objects endpoint",
@@ -1410,8 +1500,34 @@ func init() {
 			}},
 		}, {
 			Name:     "location_constraint",
+			Help:     "Location constraint - must be set to match the Region.\n\nUsed when creating buckets only.",
+			Provider: "Qiniu",
+			Examples: []fs.OptionExample{{
+				Value: "cn-east-1",
+				Help:  "East China Region 1",
+			}, {
+				Value: "cn-east-2",
+				Help:  "East China Region 2",
+			}, {
+				Value: "cn-north-1",
+				Help:  "North China Region 1",
+			}, {
+				Value: "cn-south-1",
+				Help:  "South China Region 1",
+			}, {
+				Value: "us-north-1",
+				Help:  "North America Region 1",
+			}, {
+				Value: "ap-southeast-1",
+				Help:  "Southeast Asia Region 1",
+			}, {
+				Value: "ap-northeast-1",
+				Help:  "Northeast Asia Region 1",
+			}},
+		}, {
+			Name:     "location_constraint",
 			Help:     "Location constraint - must be set to match the Region.\n\nLeave blank if not sure. Used when creating buckets only.",
-			Provider: "!AWS,IBMCOS,IDrive,Alibaba,HuaweiOBS,ChinaMobile,Cloudflare,ArvanCloud,RackCorp,Scaleway,StackPath,Storj,TencentCOS",
+			Provider: "!AWS,Alibaba,HuaweiOBS,ChinaMobile,Cloudflare,IBMCOS,IDrive,IONOS,ArvanCloud,Qiniu,RackCorp,Scaleway,StackPath,Storj,TencentCOS",
 		}, {
 			Name: "acl",
 			Help: `Canned ACL used when creating buckets and storing or copying objects.
@@ -1535,8 +1651,21 @@ isn't set then "acl" is used instead.`,
 				Help:  "arn:aws:kms:*",
 			}},
 		}, {
-			Name:     "sse_customer_key",
-			Help:     "If using SSE-C you must provide the secret encryption key used to encrypt/decrypt your data.",
+			Name: "sse_customer_key",
+			Help: `To use SSE-C you may provide the secret encryption key used to encrypt/decrypt your data.
+
+Alternatively you can provide --sse-customer-key-base64.`,
+			Provider: "AWS,Ceph,ChinaMobile,Minio",
+			Advanced: true,
+			Examples: []fs.OptionExample{{
+				Value: "",
+				Help:  "None",
+			}},
+		}, {
+			Name: "sse_customer_key_base64",
+			Help: `If using SSE-C you must provide the secret encryption key encoded in base64 format to encrypt/decrypt your data.
+
+Alternatively you can provide --sse-customer-key.`,
 			Provider: "AWS,Ceph,ChinaMobile,Minio",
 			Advanced: true,
 			Examples: []fs.OptionExample{{
@@ -1664,6 +1793,24 @@ If you leave it blank, this is calculated automatically from the sse_customer_ke
 			}, {
 				Value: "GLACIER",
 				Help:  "Archived storage.\nPrices are lower, but it needs to be restored first to be accessed.",
+			}},
+		}, {
+			// Mapping from here: https://developer.qiniu.com/kodo/5906/storage-type
+			Name:     "storage_class",
+			Help:     "The storage class to use when storing new objects in Qiniu.",
+			Provider: "Qiniu",
+			Examples: []fs.OptionExample{{
+				Value: "STANDARD",
+				Help:  "Standard storage class",
+			}, {
+				Value: "LINE",
+				Help:  "Infrequent access storage mode",
+			}, {
+				Value: "GLACIER",
+				Help:  "Archive storage mode",
+			}, {
+				Value: "DEEP_ARCHIVE",
+				Help:  "Deep archive storage mode",
 			}},
 		}, {
 			Name: "upload_cutoff",
@@ -2009,12 +2156,17 @@ See [the time option docs](/docs/#time-option) for valid formats.
 			Help: `If set this will decompress gzip encoded objects.
 
 It is possible to upload objects to S3 with "Content-Encoding: gzip"
-set. Normally rclone will download these files files as compressed objects.
+set. Normally rclone will download these files as compressed objects.
 
 If this flag is set then rclone will decompress these files with
 "Content-Encoding: gzip" as they are received. This means that rclone
 can't check the size and hash but the file contents will be decompressed.
 `,
+			Advanced: true,
+			Default:  false,
+		}, {
+			Name:     "no_system_metadata",
+			Help:     `Suppress setting and reading of system metadata`,
 			Advanced: true,
 			Default:  false,
 		},
@@ -2111,6 +2263,7 @@ type Options struct {
 	SSEKMSKeyID           string               `config:"sse_kms_key_id"`
 	SSECustomerAlgorithm  string               `config:"sse_customer_algorithm"`
 	SSECustomerKey        string               `config:"sse_customer_key"`
+	SSECustomerKeyBase64  string               `config:"sse_customer_key_base64"`
 	SSECustomerKeyMD5     string               `config:"sse_customer_key_md5"`
 	StorageClass          string               `config:"storage_class"`
 	UploadCutoff          fs.SizeSuffix        `config:"upload_cutoff"`
@@ -2142,6 +2295,7 @@ type Options struct {
 	Versions              bool                 `config:"versions"`
 	VersionAt             fs.Time              `config:"version_at"`
 	Decompress            bool                 `config:"decompress"`
+	NoSystemMetadata      bool                 `config:"no_system_metadata"`
 }
 
 // Fs represents a remote s3 server
@@ -2537,6 +2691,10 @@ func setQuirks(opt *Options) {
 		useMultipartEtag = false // untested
 	case "IDrive":
 		virtualHostStyle = false
+	case "IONOS":
+		// listObjectsV2 supported - https://api.ionos.com/docs/s3/#Basic-Operations-get-Bucket-list-type-2
+		virtualHostStyle = false
+		urlEncodeListings = false
 	case "LyveCloud":
 		useMultipartEtag = false // LyveCloud seems to calculate multipart Etags differently from AWS
 	case "Minio":
@@ -2573,6 +2731,9 @@ func setQuirks(opt *Options) {
 		useMultipartEtag = false // untested
 	case "Wasabi":
 		// No quirks
+	case "Qiniu":
+		useMultipartEtag = false
+		urlEncodeListings = false
 	case "Other":
 		listObjectsV2 = false
 		virtualHostStyle = false
@@ -2643,6 +2804,16 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	if opt.BucketACL == "" {
 		opt.BucketACL = opt.ACL
+	}
+	if opt.SSECustomerKeyBase64 != "" && opt.SSECustomerKey != "" {
+		return nil, errors.New("s3: can't use sse_customer_key and sse_customer_key_base64 at the same time")
+	} else if opt.SSECustomerKeyBase64 != "" {
+		// Decode the base64-encoded key and store it in the SSECustomerKey field
+		decoded, err := base64.StdEncoding.DecodeString(opt.SSECustomerKeyBase64)
+		if err != nil {
+			return nil, fmt.Errorf("s3: Could not decode sse_customer_key_base64: %w", err)
+		}
+		opt.SSECustomerKey = string(decoded)
 	}
 	if opt.SSECustomerKey != "" && opt.SSECustomerKeyMD5 == "" {
 		// calculate CustomerKeyMD5 if not supplied
@@ -4448,7 +4619,15 @@ func (o *Object) setMetaData(resp *s3.HeadObjectOutput) {
 		o.lastModified = time.Now()
 		fs.Logf(o, "Failed to read last modified")
 	} else {
-		o.lastModified = *resp.LastModified
+		// Try to keep the maximum precision in lastModified. If we read
+		// it from listings then it may have millisecond precision, but
+		// if we read it from a HEAD/GET request then it will have
+		// second precision.
+		equalToWithinOneSecond := o.lastModified.Truncate(time.Second).Equal((*resp.LastModified).Truncate(time.Second))
+		newHasNs := (*resp.LastModified).Nanosecond() != 0
+		if !equalToWithinOneSecond || newHasNs {
+			o.lastModified = *resp.LastModified
+		}
 	}
 	o.mimeType = aws.StringValue(resp.ContentType)
 
@@ -5054,6 +5233,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	for k, v := range meta {
 		pv := aws.String(v)
 		k = strings.ToLower(k)
+		if o.fs.opt.NoSystemMetadata {
+			req.Metadata[k] = pv
+			continue
+		}
 		switch k {
 		case "cache-control":
 			req.CacheControl = pv
@@ -5174,6 +5357,20 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		}
 	}
 
+	// Check metadata keys and values are valid
+	for key, value := range req.Metadata {
+		if !httpguts.ValidHeaderFieldName(key) {
+			fs.Errorf(o, "Dropping invalid metadata key %q", key)
+			delete(req.Metadata, key)
+		} else if value == nil {
+			fs.Errorf(o, "Dropping nil metadata value for key %q", key)
+			delete(req.Metadata, key)
+		} else if !httpguts.ValidHeaderFieldValue(*value) {
+			fs.Errorf(o, "Dropping invalid metadata value %q for key %q", *value, key)
+			delete(req.Metadata, key)
+		}
+	}
+
 	var wantETag string        // Multipart upload Etag to check
 	var gotEtag string         // Etag we got from the upload
 	var lastModified time.Time // Time we got from the upload
@@ -5199,7 +5396,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		var head s3.HeadObjectOutput
 		//structs.SetFrom(&head, &req)
 		setFrom_s3HeadObjectOutput_s3PutObjectInput(&head, &req)
-		head.ETag = &md5sumHex // doesn't matter quotes are misssing
+		head.ETag = &md5sumHex // doesn't matter quotes are missing
 		head.ContentLength = &size
 		// If we have done a single part PUT request then we can read these
 		if gotEtag != "" {
@@ -5318,6 +5515,9 @@ func (o *Object) Metadata(ctx context.Context) (metadata fs.Metadata, err error)
 
 	// Set system metadata
 	setMetadata := func(k string, v *string) {
+		if o.fs.opt.NoSystemMetadata {
+			return
+		}
 		if v == nil || *v == "" {
 			return
 		}

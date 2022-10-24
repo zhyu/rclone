@@ -192,7 +192,7 @@ func TestHashOnUpdate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "9a0364b9e99bb480dd25e1f0284c8555", md5)
 
-	// Reupload it with diferent contents but same size and timestamp
+	// Reupload it with different contents but same size and timestamp
 	var b = bytes.NewBufferString("CONTENT")
 	src := object.NewStaticObjectInfo(filePath, when, int64(b.Len()), true, nil, f)
 	err = o.Update(ctx, b, src)
@@ -377,6 +377,9 @@ func TestFilter(t *testing.T) {
 	r.WriteFile("included", "included file", when)
 	r.WriteFile("excluded", "excluded file", when)
 	f := r.Flocal.(*Fs)
+
+	// Check set up for filtering
+	assert.True(t, f.Features().FilterAware)
 
 	// Add a filter
 	ctx, fi := filter.AddConfig(ctx)
