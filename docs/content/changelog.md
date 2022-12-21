@@ -5,6 +5,135 @@ description: "Rclone Changelog"
 
 # Changelog
 
+## v1.61.0 - 2022-12-20
+
+[See commits](https://github.com/rclone/rclone/compare/v1.60.0...v1.61.0)
+
+* New backends
+    * New S3 providers
+        * [Liara LOS](/s3/#liara-cloud) (MohammadReza)
+* New Features
+    * build: Add vulnerability testing using govulncheck (albertony)
+    * cmd: Enable `SIGINFO` (Ctrl-T) handler on FreeBSD, NetBSD, OpenBSD and Dragonfly BSD (x3-apptech)
+    * config: Add [config/setpath](/rc/#config-setpath) for setting config path via rc/librclone (Nick Craig-Wood)
+    * dedupe
+        * Count Checks in the stats while scanning for duplicates (Nick Craig-Wood)
+        * Make dedupe obey the filters (Nick Craig-Wood)
+    * dlna: Properly attribute code used from https://github.com/anacrolix/dms (Nick Craig-Wood)
+    * docs
+        * Add minimum versions and status badges to backend and command docs (Nick Craig-Wood, albertony)
+        * Remote names may not start or end with space (albertony)
+    * filter: Add metadata filters [--metadata-include/exclude/filter](/filtering/#metadata) and friends (Nick Craig-Wood)
+    * fs
+        * Make all duration flags take `y`, `M`, `w`, `d` etc suffixes (Nick Craig-Wood)
+        * Add global flag `--color` to control terminal colors (Kevin Verstaen)
+    * fspath: Allow unicode numbers and letters in remote names (albertony)
+    * lib/file: Improve error message for creating dir on non-existent network host on windows (albertony)
+    * lib/http: Finish port of rclone servers to `lib/http` (Tom Mombourquette, Nick Craig-Wood)
+    * lib/oauthutil: Improved usability of config flows needing web browser (Ole Frost)
+    * ncdu
+        * Add support for modification time (albertony)
+        * Fallback to sort by name also for sort by average size (albertony)
+        * Rework to use tcell directly instead of the termbox wrapper (eNV25)
+    * rc: Add commands to set [GC Percent](/rc/#debug-set-gc-percent) & [Memory Limit](/rc/#debug-set-soft-memory-limit) (go 1.19+) (Anagh Kumar Baranwal)
+    * rcat: Preserve metadata when Copy falls back to Rcat (Nick Craig-Wood)
+    * rcd: Refactor rclone rc server to use `lib/http` (Nick Craig-Wood)
+    * rcserver: Avoid generating default credentials with htpasswd (Kamui)
+    * restic: Refactor to use `lib/http` (Nolan Woods)
+    * serve http: Support unix sockets and multiple listeners (Tom Mombourquette)
+    * serve webdav: Refactor to use `lib/http` (Nick Craig-Wood)
+    * test: Replace defer cleanup with `t.Cleanup` (Eng Zer Jun)
+    * test memory: Read metadata if `-M` flag is specified (Nick Craig-Wood)
+    * wasm: Comply with `wasm_exec.js` licence terms (Matthew Vernon)
+* Bug Fixes
+    * build: Update `golang.org/x/net/http2` to fix GO-2022-1144 (Nick Craig-Wood)
+    * restic: Fix typo in docs 'remove' should be 'remote' (asdffdsazqqq)
+    * serve dlna: Fix panic: Logger uninitialized. (Nick Craig-Wood)
+* Mount
+    * Update cgofuse for FUSE-T support for mounting volumes on Mac (Nick Craig-Wood)
+* VFS
+    * Windows: fix slow opening of exe files by not truncating files when not necessary (Nick Craig-Wood)
+    * Fix IO Error opening a file with `O_CREATE|O_RDONLY` in `--vfs-cache-mode` not full (Nick Craig-Wood)
+* Crypt
+    * Fix compress wrapping crypt giving upload errors (Nick Craig-Wood)
+* Azure Blob
+    * Port to new SDK (Nick Craig-Wood)
+        * Revamp authentication to include all methods and docs (Nick Craig-Wood)
+        * Port old authentication methods to new SDK (Nick Craig-Wood, Brad Ackerman)
+        * Thanks to [Stonebranch](https://www.stonebranch.com/) for sponsoring this work.
+    * Add `--azureblob-no-check-container` to assume container exists (Nick Craig-Wood)
+    * Add `--use-server-modtime` support (Abdullah Saglam)
+    * Add support for custom upload headers (rkettelerij)
+    * Allow emulator account/key override (Roel Arents)
+    * Support simple "environment credentials" (Nathaniel Wesley Filardo)
+    * Ignore `AuthorizationFailure` when trying to create a create a container (Nick Craig-Wood)
+* Box
+    * Added note on Box API rate limits (Ole Frost)
+* Drive
+    * Handle shared drives with leading/trailing space in name (related to) (albertony)
+* FTP
+    * Update help text of implicit/explicit TLS options to refer to FTPS instead of FTP (ycdtosa)
+    * Improve performance to speed up `--files-from` and `NewObject` (Anthony Pessy)
+* HTTP
+    * Parse GET responses when `no_head` is set (Arnie97)
+    * Do not update object size based on `Range` requests (Arnie97)
+    * Support `Content-Range` response header (Arnie97)
+* Onedrive
+    * Document workaround for shared with me files (vanplus)
+* S3
+    * Add Liara LOS to provider list (MohammadReza)
+    * Add DigitalOcean Spaces regions `sfo3`, `fra1`, `syd1` (Jack)
+    * Avoid privileged `GetBucketLocation` to resolve s3 region (Anthony Pessy)
+    * Stop setting object and bucket ACL to `private` if it is an empty string (Philip Harvey)
+    * If bucket or object ACL is empty string then don't add `X-Amz-Acl:` header (Nick Craig-Wood)
+    * Reduce memory consumption for s3 objects (Erik Agterdenbos)
+    * Fix listing loop when using v2 listing on v1 server (Nick Craig-Wood)
+    * Fix nil pointer exception when using Versions (Nick Craig-Wood)
+    * Fix excess memory usage when using versions (Nick Craig-Wood)
+    * Ignore versionIDs from uploads unless using `--s3-versions` or `--s3-versions-at` (Nick Craig-Wood)
+* SFTP
+    * Add configuration options to set ssh Ciphers / MACs / KeyExchange (dgouju)
+    * Auto-detect shell type for fish (albertony)
+    * Fix NewObject with leading / (Nick Craig-Wood)
+* Smb
+    * Fix issue where spurious dot directory is created (albertony)
+* Storj
+    * Implement server side Copy (Kaloyan Raev)
+
+## v1.60.1 - 2022-11-17
+
+[See commits](https://github.com/rclone/rclone/compare/v1.60.0...v1.60.1)
+
+* Bug Fixes
+    * lib/cache: Fix alias backend shutting down too soon (Nick Craig-Wood)
+    * wasm: Fix walltime link error by adding up-to-date wasm_exec.js (João Henrique Franco)
+    * docs
+        * Update faq.md with bisync (Samuel Johnson)
+        * Corrected download links in windows install docs (coultonluke)
+        * Add direct download link for windows arm64 (albertony)
+        * Remove link to rclone slack as it is no longer supported (Nick Craig-Wood)
+        * Faq: how to use a proxy server that requires a username and password (asdffdsazqqq)
+        * Oracle-object-storage: doc fix (Manoj Ghosh)
+        * Fix typo `remove` in rclone_serve_restic command (Joda Stößer)
+        * Fix character that was incorrectly interpreted as markdown (Clément Notin)
+* VFS
+    * Fix deadlock caused by cache cleaner and upload finishing (Nick Craig-Wood)
+* Local
+    * Clean absolute paths (albertony)
+    * Fix -L/--copy-links with filters missing directories (Nick Craig-Wood)
+* Mailru
+    * Note that an app password is now needed (Nick Craig-Wood)
+    * Allow timestamps to be before the epoch 1970-01-01 (Nick Craig-Wood)
+* S3
+    * Add provider quirk `--s3-might-gzip` to fix corrupted on transfer: sizes differ (Nick Craig-Wood)
+    * Allow Storj to server side copy since it seems to work now (Nick Craig-Wood)
+    * Fix for unchecked err value in s3 listv2 (Aaron Gokaslan)
+    * Add additional Wasabi locations (techknowlogick)
+* Smb
+    * Fix `Failed to sync: context canceled` at the end of syncs (Nick Craig-Wood)
+* WebDAV
+    * Fix Move/Copy/DirMove when using -server-side-across-configs (Nick Craig-Wood)
+
 ## v1.60.0 - 2022-10-21
 
 [See commits](https://github.com/rclone/rclone/compare/v1.59.0...v1.60.0)
