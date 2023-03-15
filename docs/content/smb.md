@@ -1,7 +1,7 @@
 ---
 title: "SMB / CIFS"
 description: "Rclone docs for SMB backend"
-versionIntroduced: "v1.60.0"
+versionIntroduced: "v1.60"
 ---
 
 # {{< icon "fa fa-server" >}} SMB
@@ -170,6 +170,25 @@ Properties:
 - Env Var:     RCLONE_SMB_DOMAIN
 - Type:        string
 - Default:     "WORKGROUP"
+
+#### --smb-spn
+
+Service principal name.
+
+Rclone presents this name to the server. Some servers use this as further
+authentication, and it often needs to be set for clusters. For example:
+
+    cifs/remotehost:1020
+
+Leave blank if not sure.
+
+
+Properties:
+
+- Config:      spn
+- Env Var:     RCLONE_SMB_SPN
+- Type:        string
+- Required:    false
 
 ### Advanced options
 

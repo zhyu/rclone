@@ -1,7 +1,7 @@
 ---
 title: "Zoho"
 description: "Zoho WorkDrive"
-versionIntroduced: "v1.54.0"
+versionIntroduced: "v1.54"
 ---
 
 # {{< icon "fas fa-folder" >}} Zoho Workdrive
@@ -103,7 +103,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote path, deleting any
 excess files in the path.
 
-    rclone sync -i /home/local/directory remote:directory
+    rclone sync --interactive /home/local/directory remote:directory
 
 Zoho paths may be as deep as required, eg `remote:directory/subdirectory`.
 
