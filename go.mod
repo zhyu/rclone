@@ -13,6 +13,7 @@ require (
 	github.com/a8m/tree v0.0.0-20230208161321-36ae24ddad15
 	github.com/aalpar/deheap v0.0.0-20210914013432-0cc84d79dec3
 	github.com/abbot/go-http-auth v0.4.0
+	github.com/aliyun/aliyun-oss-go-sdk v2.2.5+incompatible
 	github.com/anacrolix/dms v1.6.0
 	github.com/anacrolix/log v0.14.1
 	github.com/atotto/clipboard v0.1.4
