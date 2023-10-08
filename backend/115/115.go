@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/deadblue/elevengo"
 	"github.com/patrickmn/go-cache"
 	"github.com/rclone/rclone/backend/115/api"
 	"github.com/rclone/rclone/backend/115/crypto"
@@ -40,11 +41,57 @@ const (
 	decayConstant   = 2
 )
 
+var commandHelp = []fs.CommandHelp{{
+	Name:  "offlineadd",
+	Short: "Add offline download tasks",
+	Long: `This command adds offline download tasks.
+
+Usage:
+
+    rclone backend offlineadd 115: url1 url2 url3 ...
+
+Downloads will be stored in the default location.
+`,
+}, {
+	Name:  "offlinelist",
+	Short: "List offline download tasks",
+	Long: `This command lists offline download tasks.
+
+Usage:
+
+    rclone backend offlinelist 115:
+`,
+}, {
+	Name:  "offlinels",
+	Short: "List offline download tasks",
+	Long: `This command lists offline download tasks. It's an alias of "offlinelist".
+
+Usage:
+
+    rclone backend offlinels 115:
+`,
+}, {
+	Name:  "offlineclear",
+	Short: "Clear offline download tasks by status",
+	Long: `This command clears offline download tasks by status.
+	If no status is specified, only "done" tasks will be cleared.
+
+Usage:
+
+    rclone backend offlineclear 115:
+    rclone backend offlineclear 115: done
+    rclone backend offlineclear 115: failed
+    rclone backend offlineclear 115: running
+    rclone backend offlineclear 115: all
+`,
+}}
+
 // Register with Fs
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "115",
 		Description: "115 drive",
+		CommandHelp: commandHelp,
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "uid",
@@ -96,6 +143,7 @@ type Fs struct {
 	srv      *rest.Client
 	pacer    *fs.Pacer
 	cache    *cache.Cache
+	agent    *elevengo.Agent
 }
 
 // Object describes a 115 object
@@ -141,6 +189,7 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 		srv:   rest.NewClient(&http.Client{}),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		cache: cache.New(time.Minute, time.Minute*2),
+		agent: elevengo.Default(),
 	}
 	f.srv.SetErrorHandler(func(resp *http.Response) error {
 		body, err := rest.ReadBody(resp)
@@ -177,6 +226,14 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
+	credentials := &elevengo.Credential{
+		UID:  opt.UID,
+		CID:  opt.CID,
+		SEID: opt.SEID,
+	}
+	if err := f.agent.CredentialImport(credentials); err != nil {
+		fs.Logf(f, "failed to import credentials, offline tasks related features are expected to fail: %v", err)
+	}
 
 	info, err := f.readMetaDataForPath(ctx, f.remotePath("/"))
 	if err == nil && !info.IsDir() {
@@ -185,6 +242,61 @@ func NewFs(ctx context.Context, name string, root string, m configmap.Mapper) (f
 	}
 
 	return f, nil
+}
+
+// Command the backend to run a named command
+//
+// The command run is name
+// args may be used to read arguments from
+// opts may be used to read optional arguments from
+//
+// The result should be capable of being JSON encoded
+// If it is a string or a []string it will be shown to the user
+// otherwise it will be JSON encoded and shown to the user like that
+func (f *Fs) Command(ctx context.Context, name string, args []string, opts map[string]string) (out interface{}, err error) {
+	switch name {
+	case "offlineadd":
+		return f.agent.OfflineAddUrl(args)
+	case "offlinelist", "offlinels":
+		tasks := make([]string, 0)
+		tasks = append(tasks, "Name - Status - Progress")
+		it, err := f.agent.OfflineIterate()
+		for ; err == nil; err = it.Next() {
+			task := &elevengo.OfflineTask{}
+			if err = it.Get(task); err == nil {
+				status := "Unknown"
+				if task.IsDone() {
+					status = "Done"
+				} else if task.IsRunning() {
+					status = "Running"
+				} else if task.IsFailed() {
+					status = "Failed"
+				}
+				// append "taskName - taskStatus - taskProgress" to tasks
+				tasks = append(tasks, fmt.Sprintf("%s - %s - %f%%", task.Name, status, task.Percent))
+			}
+		}
+		return tasks, nil
+	case "offlineclear":
+		flag := elevengo.OfflineClearDone
+		if len(args) > 0 {
+			switch args[0] {
+			case "all":
+				flag = elevengo.OfflineClearAll
+			case "failed":
+				flag = elevengo.OfflineClearFailed
+			case "running":
+				flag = elevengo.OfflineClearRunning
+			case "done":
+				flag = elevengo.OfflineClearDone
+			default:
+				return nil, errors.New("invalid option, only 'all', 'failed', 'running', 'done' are allowed")
+			}
+		}
+		return nil, f.agent.OfflineClear(flag)
+	default:
+		return nil, fs.ErrorCommandNotFound
+	}
 }
 
 // Name of the remote (as passed into NewFs)
